@@ -2,7 +2,7 @@
 
 **面向 [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness)（dsh）的可打断双车道 agent-loop 插件。**
 
-> **声明：** 仅社区致敬命名。**与 xAI / Grok Bot 无任何隶属、背书或赞助关系。** 独立 MIT 插件，通过 Cordis id `agent-loop` 替换官方 `@deepseek-ai/dsh-agent-loop`。
+> **声明：** 仅社区致敬命名。**与 xAI / Grok Bot 无任何隶属、背书或赞助关系。** 独立 MIT 插件：禁用官方 `agent-loop` 行并插入自有 Cordis 条目（不可对已有 id 改 `name`）。
 
 [English](./README.md) | 中文
 
@@ -30,18 +30,30 @@
 dsh plugin --profile web add github:jqlong17/grokbot-agent-loop
 ```
 
-包内 `cordis.patch.yml` 会按 id 替换 `agent-loop`：
+Cordis **不能**修改已有 id 的 `name`（同 id 改名会被 `name mismatch` 跳过）。包内 `cordis.patch.yml` 因此 **禁用** 官方 `agent-loop`，再 **insert** 新行：
 
 ```yaml
 - id: agent-loop
-  name: '@harness-plugins/grokbot-agent-loop'
-  config:
-    maxParallelToolCalls: 10
-    interruptOnSteer: true
-    agents: []
+  disabled: true
+
+- insert:
+    - id: grokbot-agent-loop
+      name: '@harness-plugins/grokbot-agent-loop'
+      config:
+        maxParallelToolCalls: 10
+        interruptOnSteer: true
+        agents: []
 ```
 
-完整示例见 [`examples/cordis.patch.yml`](./examples/cordis.patch.yml)。
+`AgentFactory` 由本包在新行加载时注册，不依赖官方条目 id。完整示例见 [`examples/cordis.patch.yml`](./examples/cordis.patch.yml)。
+
+### 验证
+
+```sh
+dsh web --dump-config
+```
+
+期望：无 `name mismatch` 警告；官方 `agent-loop` 为 `disabled: true`；存在 `grokbot-agent-loop` 且 `name` 为本包。
 
 ### 卸载 / 恢复官方 loop
 
@@ -49,7 +61,7 @@ dsh plugin --profile web add github:jqlong17/grokbot-agent-loop
 dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 ```
 
-或从 profile 的 `cordis.patch.yml` 删掉对 `agent-loop` 的覆盖，使 `@deepseek-ai/dsh-base` 中的官方 `name` 重新生效。
+或从 profile 的 `cordis.patch.yml` 删掉 disable + `grokbot-agent-loop` insert，使 `@deepseek-ai/dsh-base` 中的官方 `agent-loop` 重新启用。
 
 ## 忙时 Enter 与排队快捷键
 
