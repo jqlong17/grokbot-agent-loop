@@ -1,0 +1,10 @@
+GrokBot Loop includes code derived from DeepSeek Harness
+`packages/core/agent-loop` (@deepseek-ai/dsh-agent-loop), Copyright (c)
+DeepSeek and contributors, licensed under the MIT License.
+
+See LICENSE for the full MIT license text applicable to this package and
+the incorporated upstream portions.
+
+This project is an independent community plugin. It is not affiliated with,
+endorsed by, or sponsored by xAI, Grok Bot, or DeepSeek beyond use of their
+public open-source / published packages under their respective licenses.

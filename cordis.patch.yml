@@ -1,0 +1,12 @@
+# GrokBot Loop bundle layer: replace the stock agent-loop row by id.
+# Last write wins — install this bundle (or paste into your profile patch)
+# so id `agent-loop` loads `@harness-plugins/grokbot-agent-loop`.
+#
+# Uninstall / remove this patch to restore `@deepseek-ai/dsh-agent-loop`.
+
+- id: agent-loop
+  name: '@harness-plugins/grokbot-agent-loop'
+  config:
+    maxParallelToolCalls: 10
+    interruptOnSteer: true
+    agents: []
