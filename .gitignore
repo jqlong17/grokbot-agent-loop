@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.npm-cache/
+*.tgz
+lib/**/*.map
+*.tsbuildinfo
