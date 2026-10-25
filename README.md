@@ -2,7 +2,7 @@
 
 **Interruptible dual-lane agent-loop plugin for [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) (dsh).**
 
-> **Disclaimer:** Community homage naming only. **Not affiliated with, endorsed by, or sponsored by xAI or Grok Bot.** Independent MIT-licensed plugin that replaces the stock `@deepseek-ai/dsh-agent-loop` Cordis row by id.
+> **Disclaimer:** Community homage naming only. **Not affiliated with, endorsed by, or sponsored by xAI or Grok Bot.** Independent MIT-licensed plugin that disables the stock `@deepseek-ai/dsh-agent-loop` row and inserts its own Cordis entry.
 
 English | [中文](./README.zh.md)
 
@@ -30,22 +30,36 @@ Requires a working dsh profile (Node `^22.19.0 \|\| >=24.0.0`, dsh `>=0.2.0 <0.3
 # Preferred: activate as a profile bundle (declares dsh.bundle.patch)
 dsh plugin --profile web add github:jqlong17/grokbot-agent-loop
 
-# Or npm/pnpm into the profile, then ensure cordis.patch swaps id agent-loop
+# Or npm/pnpm into the profile, then apply the disable+insert patch below
 pnpm --dir "$DSH_HOME/profiles/web" add github:jqlong17/grokbot-agent-loop
 ```
 
-The package ships `cordis.patch.yml` that replaces Cordis id `agent-loop`:
+Cordis **cannot** change `name` on an existing id (same-id rename is skipped with `name mismatch`). The shipped `cordis.patch.yml` therefore **disables** stock `agent-loop` and **inserts** a new row:
 
 ```yaml
 - id: agent-loop
-  name: '@harness-plugins/grokbot-agent-loop'
-  config:
-    maxParallelToolCalls: 10
-    interruptOnSteer: true
-    agents: []
+  disabled: true
+
+- insert:
+    - id: grokbot-agent-loop
+      name: '@harness-plugins/grokbot-agent-loop'
+      config:
+        maxParallelToolCalls: 10
+        interruptOnSteer: true
+        agents: []
 ```
 
+`AgentFactory` is registered by this package when the new row loads — not by the stock entry id.
+
 See [`examples/cordis.patch.yml`](./examples/cordis.patch.yml) for a copy-paste profile overlay.
+
+### Verify
+
+```sh
+dsh web --dump-config
+```
+
+Expect: no `name mismatch` warning; stock `agent-loop` has `disabled: true`; `grokbot-agent-loop` is present with `name: '@harness-plugins/grokbot-agent-loop'`.
 
 ### Manual profile patch
 
@@ -59,7 +73,7 @@ If you install without the bundle layer, add the snippet above to:
 dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 ```
 
-Or delete the `agent-loop` override from your profile patch so `@deepseek-ai/dsh-base`’s stock `name: '@deepseek-ai/dsh-agent-loop'` wins again.
+Or remove the disable + `grokbot-agent-loop` insert from your profile patch so the stock `agent-loop` row from `@deepseek-ai/dsh-base` is enabled again.
 
 ## Busy Enter vs Queue shortcut
 
