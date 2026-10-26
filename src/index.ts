@@ -76,30 +76,48 @@ export {
 export {
   WorkUnitRegistry,
   UNIT_FOLD_MARKER,
+  UNIT_FORK_MARKER,
+  UNIT_FOLD_BACK_MARKER,
+  PEER_HANDOFF_MARKER,
   DELIVERY_GATE_MARKER,
   DEFAULT_DELIVERY_GATE_MAX,
   DEFAULT_SUBSTANTIVE_MIN_CHARS,
   DEFAULT_GOAL_SUMMARY_MAX,
+  DEFAULT_PEER_DELIVERY_SHAPE,
   assistantPrefixStats,
   buildDeliveryGateMeta,
   buildDeliveryGateNotice,
+  buildPeerHandoffNotice,
+  buildUnitFoldBackNotice,
   buildUnitFoldBlock,
+  buildUnitForkBlock,
   canMarkCompleted,
+  defaultPeerDeliverySpec,
   inferDeliveryFromBlocks,
   isDeliveryGateNotice,
+  isDeliverySpecMet,
+  isPeerHandoffNotice,
   isSubstantiveAssistantText,
+  normalizePeerHandoffPacket,
+  peerPacketToPayload,
   shouldRunDeliveryGate,
   simpleTextHash,
   summarizeGoal,
+  verifyDeliverySpec,
   type CheckpointReason,
   type CreateWorkUnitInput,
   type DeliveryGateMeta,
+  type DeliverySink,
+  type DeliverySpec,
   type InferDeliveryOptions,
+  type PeerHandoffPacket,
+  type RpwuOtherMode,
   type StepCheckpoint,
   type ToolResultRef,
   type WorkUnit,
   type WorkUnitDelivery,
   type WorkUnitLane,
+  type WorkUnitQuery,
   type WorkUnitSnapshot,
   type WorkUnitStatus,
 } from './work-unit.ts'
@@ -408,8 +426,15 @@ export interface Config {
    */
   rpwuEnabled: boolean
   /**
+   * RPWU P1-a: how a preempting OTHER workstream joins the registry.
+   * - `fold` (default): fold into MAIN — preserves 0.1.7 short-protocol behavior
+   * - `fork`: create an independently queryable sibling WorkUnit; complete → fold-back
+   */
+  rpwuOtherMode: 'fold' | 'fork'
+  /**
    * When true (default, requires rpwuEnabled), a unit cannot complete on
    * workspace-only / non-substantive delivery; inject chat-visible continuations.
+   * When a unit carries `deliverySpec`, the gate also verifies shape + sink.
    */
   deliveryGate: boolean
   /**
@@ -461,6 +486,7 @@ export class AgentLoop extends Service implements AgentFactory {
     steerFoldMode?: 'bot-like' | 'minimal'
     steerResumeAnchor?: boolean
     rpwuEnabled?: boolean
+    rpwuOtherMode?: 'fold' | 'fork'
     deliveryGate?: boolean
     deliveryGateMaxRetries?: number
   }, Config> = z.object({
@@ -470,6 +496,7 @@ export class AgentLoop extends Service implements AgentFactory {
     steerFoldMode: z.union(['bot-like', 'minimal']).default('bot-like'),
     steerResumeAnchor: z.boolean().default(true),
     rpwuEnabled: z.boolean().default(true),
+    rpwuOtherMode: z.union(['fold', 'fork']).default('fold'),
     deliveryGate: z.boolean().default(true),
     deliveryGateMaxRetries: z.number().step(1).min(0).default(2),
     agents: z.array(z.object({
@@ -490,6 +517,7 @@ export class AgentLoop extends Service implements AgentFactory {
     steerFoldMode?: 'bot-like' | 'minimal'
     steerResumeAnchor?: boolean
     rpwuEnabled?: boolean
+    rpwuOtherMode?: 'fold' | 'fork'
     deliveryGate?: boolean
     deliveryGateMaxRetries?: number
   }, Config>
@@ -511,6 +539,7 @@ export class AgentLoop extends Service implements AgentFactory {
       steerFoldMode: config.steerFoldMode ?? 'bot-like',
       steerResumeAnchor: config.steerResumeAnchor !== false,
       rpwuEnabled: config.rpwuEnabled !== false,
+      rpwuOtherMode: config.rpwuOtherMode === 'fork' ? 'fork' : 'fold',
       deliveryGate: config.deliveryGate !== false,
       deliveryGateMaxRetries: typeof config.deliveryGateMaxRetries === 'number'
         ? Math.max(0, Math.floor(config.deliveryGateMaxRetries))

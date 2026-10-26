@@ -56,9 +56,11 @@ import {
   buildDeliveryGateMeta,
   buildDeliveryGateNotice,
   buildUnitFoldBlock,
+  buildUnitForkBlock,
   inferDeliveryFromBlocks,
   shouldRunDeliveryGate,
   type DeliveryGateMeta,
+  type RpwuOtherMode,
   type StepCheckpoint,
   type WorkUnit,
 } from './work-unit.ts'
@@ -255,6 +257,15 @@ export class ReactLoopAgent implements Agent {
     return config?.rpwuEnabled !== false
   }
 
+  /**
+   * RPWU P1-a: how OTHER joins the registry on preempt.
+   * Default `fold` preserves 0.1.7 short-protocol behavior.
+   */
+  private rpwuOtherMode(): RpwuOtherMode {
+    const config = this.loopCtx.agentLoop?.config as { rpwuOtherMode?: RpwuOtherMode } | undefined
+    return config?.rpwuOtherMode === 'fork' ? 'fork' : 'fold'
+  }
+
   /** DeliveryGate (default on when RPWU is on). */
   private deliveryGateEnabled(): boolean {
     if (!this.rpwuEnabled()) return false
@@ -287,6 +298,7 @@ export class ReactLoopAgent implements Agent {
     input: UserMessage,
     resumeAnchor?: string | null,
     unit?: WorkUnit | null,
+    unitBlock?: string | null,
   ): UserMessage[] {
     return buildSteerClaimBatch(input, {
       foldEnabled: this.steerFoldHintEnabled(),
@@ -294,7 +306,7 @@ export class ReactLoopAgent implements Agent {
       resumeAnchor,
       unitId: unit?.id,
       unitGoalSummary: unit?.goalSummary,
-      unitFoldBlock: unit ? buildUnitFoldBlock(unit) : null,
+      unitFoldBlock: unitBlock ?? (unit ? buildUnitFoldBlock(unit) : null),
     })
   }
 
@@ -444,9 +456,13 @@ export class ReactLoopAgent implements Agent {
       const mode = foldEnabled ? this.steerFoldMode() : null
       // Snapshot MAIN before OTHER is claimed into the next-step inbox / session.
       const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
-      // RPWU P0: bind/create MAIN unit and fold OTHER into it (no fork).
+      // RPWU: bind/create MAIN; fold OTHER into it (default) or fork a sibling (P1-a).
       let boundUnit: WorkUnit | null = null
+      let siblingUnit: WorkUnit | null = null
+      let unitBlock: string | null = null
+      let otherMode: RpwuOtherMode | null = null
       if (this.rpwuEnabled()) {
+        otherMode = this.rpwuOtherMode()
         const turn = this.phase.kind === 'running' ? this.phase.turn : 0
         const step = this.phase.kind === 'running' ? this.phase.step : 0
         const goalText = resumeAnchor
@@ -461,9 +477,9 @@ export class ReactLoopAgent implements Agent {
           status: 'paused',
         })
         const otherText = userMessagePlainText(input) ?? 'OTHER'
-        this.workUnits.foldOther(boundUnit.id, otherText)
         const prefix = this.latestAssistantPrefixStats()
-        const cp = this.workUnits.appendCheckpoint({
+        // Checkpoint MAIN at preempt (always) so resume has a pointer.
+        const mainCp = this.workUnits.appendCheckpoint({
           unitId: boundUnit.id,
           stepIndex: step,
           turn,
@@ -474,9 +490,38 @@ export class ReactLoopAgent implements Agent {
           delivery: { ...boundUnit.delivery },
           reason: 'preempt',
         })
-        this.lastCheckpoint = cp
+        this.lastCheckpoint = mainCp
+
+        if (otherMode === 'fork') {
+          siblingUnit = this.workUnits.forkSibling({
+            parentId: boundUnit.id,
+            goalSummary: otherText,
+            lane: 'user',
+            createdAtTurn: turn,
+            createdAtStep: step,
+            status: 'running',
+            // Keep MAIN as active control-plane; sibling is independently queryable.
+            bindActive: false,
+          })
+          const siblingCp = this.workUnits.appendCheckpoint({
+            unitId: siblingUnit.id,
+            stepIndex: step,
+            turn,
+            assistantPrefixCursor: 0,
+            assistantPrefixHash: prefix.hash,
+            toolResultRefs: [],
+            status: 'running',
+            delivery: { ...siblingUnit.delivery },
+            reason: 'preempt',
+          })
+          this.lastCheckpoint = siblingCp
+          unitBlock = buildUnitForkBlock(boundUnit, siblingUnit)
+        } else {
+          this.workUnits.foldOther(boundUnit.id, otherText)
+          unitBlock = buildUnitFoldBlock(boundUnit)
+        }
       }
-      const batch = this.steerClaimBatch(input, resumeAnchor, boundUnit)
+      const batch = this.steerClaimBatch(input, resumeAnchor, boundUnit, unitBlock)
       this.inbox.splice('next-step', Infinity, 0, batch)
       // Trajectory-friendly preempt marker (not a user chat bubble; no full MAIN text).
       this.lastSteerPreempt = buildSteerPreemptMeta({
@@ -485,6 +530,8 @@ export class ReactLoopAgent implements Agent {
         resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
         unitId: boundUnit?.id ?? null,
         unitFoldPresent: boundUnit !== null,
+        otherMode,
+        siblingUnitId: siblingUnit?.id ?? null,
       })
       // 3) Latch wake so kick() restarts after the aborted activity drains.
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = true

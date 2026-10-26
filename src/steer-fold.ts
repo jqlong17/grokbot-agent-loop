@@ -41,7 +41,10 @@ export interface SteerFoldBuildOptions {
   unitId?: string | null
   /** RPWU P0: bound MAIN goal summary embedded in fold notice. */
   unitGoalSummary?: string | null
-  /** Optional prebuilt unit-fold block (includes marker). */
+  /**
+   * Optional prebuilt unit-fold or unit-fork block (includes marker).
+   * Prefer this over synthesizing from unitId when RPWU P1 fork is active.
+   */
   unitFoldBlock?: string | null
 }
 
@@ -191,14 +194,23 @@ export function buildSteerFoldHintMessage(
   const text = resolveSteerFoldHintTextWithAnchor(mode, options.resumeAnchor, unitFoldBlock)
   const hasAnchor = Boolean(options.resumeAnchor && options.resumeAnchor.length > 0)
   const hasUnit = Boolean(unitFoldBlock && unitFoldBlock.length > 0)
+  const forked = Boolean(unitFoldBlock && unitFoldBlock.includes('[grokbot-unit-fork]'))
   const summary = hasUnit
-    ? (hasAnchor
-      ? mode === 'minimal'
-        ? 'Steer fold (minimal+anchor+unit): OTHER then anchored MAIN on bound unit'
-        : 'Steer fold (bot-like+anchor+unit): chat dual delivery on bound MAIN unit'
-      : mode === 'minimal'
-        ? 'Steer fold (minimal+unit): OTHER then prior task on bound unit'
-        : 'Steer fold (bot-like+unit): chat dual delivery on bound MAIN unit')
+    ? (forked
+      ? (hasAnchor
+        ? mode === 'minimal'
+          ? 'Steer fold (minimal+anchor+fork): OTHER on sibling unit, then anchored MAIN'
+          : 'Steer fold (bot-like+anchor+fork): sibling OTHER then anchored MAIN dual delivery'
+        : mode === 'minimal'
+          ? 'Steer fold (minimal+fork): OTHER on sibling unit, then prior MAIN'
+          : 'Steer fold (bot-like+fork): sibling OTHER then MAIN dual delivery')
+      : (hasAnchor
+        ? mode === 'minimal'
+          ? 'Steer fold (minimal+anchor+unit): OTHER then anchored MAIN on bound unit'
+          : 'Steer fold (bot-like+anchor+unit): chat dual delivery on bound MAIN unit'
+        : mode === 'minimal'
+          ? 'Steer fold (minimal+unit): OTHER then prior task on bound unit'
+          : 'Steer fold (bot-like+unit): chat dual delivery on bound MAIN unit'))
     : hasAnchor
       ? mode === 'minimal'
         ? 'Steer fold (minimal+anchor): OTHER in chat, then anchored MAIN dual delivery'
@@ -270,8 +282,15 @@ export interface SteerPreemptMeta {
   readonly resumeAnchorPresent: boolean
   /** RPWU P0: bound MAIN unit id when fold-into-unit ran (0.1.6+). */
   readonly unitId: string | null
-  /** RPWU P0: whether a unit-fold marker was embedded. */
+  /** RPWU P0: whether a unit-fold / unit-fork marker was embedded. */
   readonly unitFoldPresent: boolean
+  /**
+   * RPWU P1-a: how OTHER joined the registry (`fold` default / `fork` sibling).
+   * Null when RPWU did not run on this preempt.
+   */
+  readonly otherMode: 'fold' | 'fork' | null
+  /** RPWU P1-a: forked sibling unit id when otherMode is `fork`. */
+  readonly siblingUnitId: string | null
 }
 
 /** Build a trajectory-friendly preempt meta record. */
@@ -281,6 +300,8 @@ export function buildSteerPreemptMeta(options: {
   resumeAnchorPresent?: boolean
   unitId?: string | null
   unitFoldPresent?: boolean
+  otherMode?: 'fold' | 'fork' | null
+  siblingUnitId?: string | null
 }): SteerPreemptMeta {
   const claimOrder: Array<'human' | 'fold-hint'> = options.foldInjected
     ? ['human', 'fold-hint']
@@ -294,5 +315,7 @@ export function buildSteerPreemptMeta(options: {
     resumeAnchorPresent: options.foldInjected ? Boolean(options.resumeAnchorPresent) : false,
     unitId: options.foldInjected ? (options.unitId ?? null) : null,
     unitFoldPresent: options.foldInjected ? Boolean(options.unitFoldPresent) : false,
+    otherMode: options.otherMode ?? null,
+    siblingUnitId: options.siblingUnitId ?? null,
   }
 }

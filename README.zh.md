@@ -65,9 +65,20 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - `steerFoldHint`（默认 `true`）— 抢占后注入「先完整回答最新插话，再无省略续写被打断主任务；优先同一条可见对话双交付」的 producer notice（对齐 grok.com Bot；不污染用户插话文案）
 - `steerFoldMode`（默认 `bot-like`）— `bot-like` 用完整两阶段契约文案；`minimal` 用更短 notice，顺序契约相同
 - `steerResumeAnchor`（默认 `true`）— 抢占 fold notice 嵌入未完成 MAIN 用户原文摘要（≤1200 字），强制同一条可见对话里续写；`false` 时≈0.1.4（无锚点引用）
-- `rpwuEnabled`（默认 `true`）— RPWU P0：会话内 WorkUnit 注册表 + step checkpoint + fold-into-unit；`false` 时≈0.1.5
-- `deliveryGate`（默认 `true`，依赖 RPWU）— 非实质/仅 workspace 交付时不让 unit 完成，注入对话续写
+- `rpwuEnabled`（默认 `true`）— RPWU：会话内 WorkUnit 注册表 + step checkpoint + fold-into-unit；`false` 时≈0.1.5
+- `rpwuOtherMode`（默认 `fold`）— P1-a：`fold` 把 OTHER 折进 MAIN（保持 0.1.7 短协议）；`fork` 创建可独立查询的 sibling WorkUnit，完成后可 fold-back 回 MAIN
+- `deliveryGate`（默认 `true`，依赖 RPWU）— 非实质/仅 workspace 交付时不让 unit 完成；若 unit 带 `deliverySpec`，一并校验 shape + sink
 - `deliveryGateMaxRetries`（默认 `2`）— 每个 unit 最多 DeliveryGate 续跑次数
+
+### 0.1.8 改动摘要
+
+朝 Grok Bot 工作模式再靠一刀（社区致敬，**非** xAI 官方）：
+
+- **P1-a fold|fork** — `rpwuOtherMode: fold|fork`（默认 `fold`）。fork 出可查 status/checkpoint/lane 的 sibling；`foldSiblingIntoMain` 把结果折回 MAIN（不做假 Temporal）
+- **P1-b agent-lane peer 回报** — `acceptPeerHandoff`：后台/peer 完成 → 结构化包（`theme` / `keyPoints` / `todos`）→ 折进 MAIN（`[grokbot-peer-handoff]`）
+- **P1-c deliverySpec** — WorkUnit 可选 `{ shape, sink }`；gate 在有契约时验字段；无契约时保留 0.1.7 sticky chatPosted / workspaceOnly
+
+诚实边界：真·多 model 并行仍属宿主；本版在单 Agent 会话内提供 registry 级 sibling + 结构化折回。
 
 ### 0.1.7 改动摘要
 
