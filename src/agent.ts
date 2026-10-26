@@ -41,6 +41,15 @@ import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 import { decideAdmission, type AdmissionKind } from './scheduler.ts'
+import {
+  buildSteerClaimBatch,
+  buildSteerPreemptMeta,
+  extractLatestHumanUserText,
+  truncateAnchor,
+  userMessagePlainText,
+  type SteerFoldMode,
+  type SteerPreemptMeta,
+} from './steer-fold.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -182,10 +191,59 @@ export class ReactLoopAgent implements Agent {
     this.admit('inject', input)
   }
 
-  /** Whether interruptible busy-steer is enabled on the mounted loop config. */
+  /**
+   * Last busy-steer preempt observability snapshot (tests / trajectory).
+   * Not a user-visible chat event; fold notice remains the prompt hook.
+   */
+  lastSteerPreempt: SteerPreemptMeta | null = null
+
+    /** Whether interruptible busy-steer is enabled on the mounted loop config. */
   private interruptOnSteerEnabled(): boolean {
     const config = this.loopCtx.agentLoop?.config as { interruptOnSteer?: boolean } | undefined
     return config?.interruptOnSteer !== false
+  }
+
+  /** Whether to inject the continue-prior fold notice after a preempting steer. */
+  private steerFoldHintEnabled(): boolean {
+    const config = this.loopCtx.agentLoop?.config as { steerFoldHint?: boolean } | undefined
+    // Default on when interruptOnSteer is on; explicit false disables.
+    if (config?.steerFoldHint === false) return false
+    return this.interruptOnSteerEnabled()
+  }
+
+  /** Fold notice verbosity: bot-like (default) or minimal. */
+  private steerFoldMode(): SteerFoldMode {
+    const config = this.loopCtx.agentLoop?.config as { steerFoldMode?: SteerFoldMode } | undefined
+    return config?.steerFoldMode === 'minimal' ? 'minimal' : 'bot-like'
+  }
+
+  /** Whether to embed unfinished MAIN text into the fold notice (0.1.5+). */
+  private steerResumeAnchorEnabled(): boolean {
+    const config = this.loopCtx.agentLoop?.config as { steerResumeAnchor?: boolean } | undefined
+    // Default on when fold hint is on; explicit false disables (≈0.1.4 notice).
+    if (config?.steerResumeAnchor === false) return false
+    return this.steerFoldHintEnabled()
+  }
+
+  /**
+   * Resolve truncated MAIN resume anchor from session history for a preempting
+   * steer. Excludes producer notices and the OTHER text about to be claimed.
+   */
+  private resolveSteerResumeAnchor(other: UserMessage): string | null {
+    if (!this.steerResumeAnchorEnabled()) return null
+    const excludeText = userMessagePlainText(other)
+    const raw = extractLatestHumanUserText(this.session, { excludeText })
+    if (raw === null) return null
+    return truncateAnchor(raw)
+  }
+
+  /** Messages to claim on next-step after a preempting steer (human OTHER, then fold). */
+  private steerClaimBatch(input: UserMessage, resumeAnchor?: string | null): UserMessage[] {
+    return buildSteerClaimBatch(input, {
+      foldEnabled: this.steerFoldHintEnabled(),
+      mode: this.steerFoldMode(),
+      resumeAnchor,
+    })
   }
 
   /** Snapshot used by the pure dual-lane scheduler. */
@@ -210,8 +268,19 @@ export class ReactLoopAgent implements Agent {
     if (decision.preempt) {
       // 1) Cooperative cancel — streamed assistant prefix stays in the session log.
       this.cancel({ kind: 'user' }, { keepInbox: true })
-      // 2) Claim path: enqueue on next-step (do not remap to next-turn).
-      this.inbox.splice('next-step', Infinity, 0, [input])
+      // 2) Claim path: human OTHER first, optional fold notice (+ MAIN anchor) after.
+      const foldEnabled = this.steerFoldHintEnabled()
+      const mode = foldEnabled ? this.steerFoldMode() : null
+      // Snapshot MAIN before OTHER is claimed into the next-step inbox / session.
+      const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
+      const batch = this.steerClaimBatch(input, resumeAnchor)
+      this.inbox.splice('next-step', Infinity, 0, batch)
+      // Trajectory-friendly preempt marker (not a user chat bubble; no full MAIN text).
+      this.lastSteerPreempt = buildSteerPreemptMeta({
+        foldInjected: foldEnabled,
+        mode,
+        resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
+      })
       // 3) Latch wake so kick() restarts after the aborted activity drains.
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = true
       return

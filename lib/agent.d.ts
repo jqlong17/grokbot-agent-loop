@@ -10,6 +10,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope';
 import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { ReactLoopInbox } from './inbox.ts';
+import { type SteerPreemptMeta } from './steer-fold.ts';
 /** Drives one session through turn and step boundaries. */
 export declare class ReactLoopAgent implements Agent {
     private loopCtx;
@@ -50,8 +51,26 @@ export declare class ReactLoopAgent implements Agent {
     steer(input: UserMessage): void;
     /** Agent-lane silent inject: next-step, no wakeup, no preempt. */
     inject(input: UserMessage): void;
+    /**
+     * Last busy-steer preempt observability snapshot (tests / trajectory).
+     * Not a user-visible chat event; fold notice remains the prompt hook.
+     */
+    lastSteerPreempt: SteerPreemptMeta | null;
     /** Whether interruptible busy-steer is enabled on the mounted loop config. */
     private interruptOnSteerEnabled;
+    /** Whether to inject the continue-prior fold notice after a preempting steer. */
+    private steerFoldHintEnabled;
+    /** Fold notice verbosity: bot-like (default) or minimal. */
+    private steerFoldMode;
+    /** Whether to embed unfinished MAIN text into the fold notice (0.1.5+). */
+    private steerResumeAnchorEnabled;
+    /**
+     * Resolve truncated MAIN resume anchor from session history for a preempting
+     * steer. Excludes producer notices and the OTHER text about to be claimed.
+     */
+    private resolveSteerResumeAnchor;
+    /** Messages to claim on next-step after a preempting steer (human OTHER, then fold). */
+    private steerClaimBatch;
     /** Snapshot used by the pure dual-lane scheduler. */
     private schedulerState;
     /**

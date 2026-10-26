@@ -2,7 +2,7 @@
 
 **Interruptible dual-lane agent-loop plugin for [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) (dsh).**
 
-> **Disclaimer:** Community homage naming only. **Not affiliated with, endorsed by, or sponsored by xAI or Grok Bot.** Independent MIT-licensed plugin that disables the stock `@deepseek-ai/dsh-agent-loop` row and inserts its own Cordis entry.
+> **Disclaimer:** Community homage naming only. **Not affiliated with, endorsed by, or sponsored by xAI or Grok Bot.** Independent MIT-licensed plugin that replaces the stock `@deepseek-ai/dsh-agent-loop` Cordis row by id.
 
 English | [中文](./README.zh.md)
 
@@ -30,36 +30,25 @@ Requires a working dsh profile (Node `^22.19.0 \|\| >=24.0.0`, dsh `>=0.2.0 <0.3
 # Preferred: activate as a profile bundle (declares dsh.bundle.patch)
 dsh plugin --profile web add github:jqlong17/grokbot-agent-loop
 
-# Or npm/pnpm into the profile, then apply the disable+insert patch below
+# Or npm/pnpm into the profile, then ensure cordis.patch swaps id agent-loop
 pnpm --dir "$DSH_HOME/profiles/web" add github:jqlong17/grokbot-agent-loop
 ```
 
-Cordis **cannot** change `name` on an existing id (same-id rename is skipped with `name mismatch`). The shipped `cordis.patch.yml` therefore **disables** stock `agent-loop` and **inserts** a new row:
+The package ships `cordis.patch.yml` that replaces Cordis id `agent-loop`:
 
 ```yaml
 - id: agent-loop
-  disabled: true
-
-- insert:
-    - id: grokbot-agent-loop
-      name: '@harness-plugins/grokbot-agent-loop'
-      config:
-        maxParallelToolCalls: 10
-        interruptOnSteer: true
-        agents: []
+  name: '@harness-plugins/grokbot-agent-loop'
+  config:
+    maxParallelToolCalls: 10
+    interruptOnSteer: true
+    steerFoldHint: true
+    steerFoldMode: bot-like
+    steerResumeAnchor: true
+    agents: []
 ```
-
-`AgentFactory` is registered by this package when the new row loads — not by the stock entry id.
 
 See [`examples/cordis.patch.yml`](./examples/cordis.patch.yml) for a copy-paste profile overlay.
-
-### Verify
-
-```sh
-dsh web --dump-config
-```
-
-Expect: no `name mismatch` warning; stock `agent-loop` has `disabled: true`; `grokbot-agent-loop` is present with `name: '@harness-plugins/grokbot-agent-loop'`.
 
 ### Manual profile patch
 
@@ -73,7 +62,7 @@ If you install without the bundle layer, add the snippet above to:
 dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 ```
 
-Or remove the disable + `grokbot-agent-loop` insert from your profile patch so the stock `agent-loop` row from `@deepseek-ai/dsh-base` is enabled again.
+Or delete the `agent-loop` override from your profile patch so `@deepseek-ai/dsh-base`’s stock `name: '@deepseek-ai/dsh-agent-loop'` wins again.
 
 ## Busy Enter vs Queue shortcut
 
@@ -81,7 +70,23 @@ Or remove the disable + `grokbot-agent-loop` insert from your profile patch so t
 2. GrokBot Loop then **preempts** the live step instead of waiting or QueueDock-parking.
 3. **Cmd/Ctrl+Enter** still calls `agent.followup()` → **next-turn Queue** (documented complementary path).
 
-Config flag: `interruptOnSteer` (default `true`). Set `false` for stock steer wait semantics while keeping this package mounted.
+Config flags:
+- `interruptOnSteer` (default `true`) — set `false` for stock steer wait semantics
+- `steerFoldHint` (default `true`) — after preempt, inject a producer notice: fully answer the newest interrupt, then finish the prior unfinished task without omission (prompt-layer fold vs grok.com Bot; does not rewrite user interrupt text)
+- `steerFoldMode` (default `bot-like`) — `bot-like` full two-phase copy; `minimal` shorter notice, same ordering contract
+- `steerResumeAnchor` (default `true`) — embed a truncated unfinished MAIN user quote in the fold notice so the model resumes the exact prior deliverable in visible chat; set `false` for 0.1.4-style notices
+
+### 0.1.5 notes
+
+MAIN resume anchor on preempt: fold notice quotes the unfinished human MAIN (≤1200 chars) and tightens chat dual-delivery (OTHER then MAIN in the same visible assistant reply; workspace-only ≠ done).
+
+### 0.1.4 notes
+
+Chat-inline dual delivery in fold notice: prefer completing OTHER then unfinished MAIN in the same visible chat/conversation reply; do not treat workspace/tool-only writes as done unless the user asked to save files.
+
+### 0.1.3 notes
+
+Stronger fold copy (never imply dropping the prior task); fixed claim order human→fold; `lastSteerPreempt` trajectory meta; `steerFoldMode`.
 
 ## Architecture
 

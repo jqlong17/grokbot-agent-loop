@@ -16,4 +16,7 @@
       config:
         maxParallelToolCalls: 10
         interruptOnSteer: true
+        steerFoldHint: true
+        steerFoldMode: bot-like
+        steerResumeAnchor: true
         agents: []

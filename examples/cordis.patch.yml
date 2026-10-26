@@ -1,7 +1,5 @@
 # Example profile overlay (~/.dsh/profiles/<name>/cordis.patch.yml)
-#
-# Do NOT set `name` on the stock `agent-loop` id — Cordis rejects same-id
-# renames ("name mismatch … skipping"). Disable stock, insert a new row.
+# Cordis cannot rename an existing id's package; disable stock then insert.
 
 - id: agent-loop
   disabled: true
@@ -14,12 +12,12 @@
         # Busy Enter / agent.steer() cooperatively cancels mid-stream and claims
         # on the next step. Set false to match stock next-step-wait semantics.
         interruptOnSteer: true
+        # After preempt, inject a producer notice: handle OTHER first, then
+        # resume the prior unfinished task (prompt-layer fold vs grok.com Bot).
+        steerFoldHint: true
+        steerFoldMode: bot-like
+        steerResumeAnchor: true
         agents: []
 
 # Complementary shortcut (Cmd/Ctrl+Enter) still uses agent.followup() →
 # next-turn QueueDock parking — no patch change required for that path.
-#
-# Verify after install:
-#   dsh web --dump-config
-# Expect stock `agent-loop` disabled: true, and `grokbot-agent-loop` present
-# with name '@harness-plugins/grokbot-agent-loop' (no name-mismatch warning).

@@ -50,6 +50,28 @@ export {
   type SchedulerState,
 } from './scheduler.ts'
 
+export {
+  STEER_FOLD_HINT_MARKER,
+  STEER_FOLD_HINT_TEXT,
+  STEER_FOLD_HINT_TEXT_BOT_LIKE,
+  STEER_FOLD_HINT_TEXT_MINIMAL,
+  DEFAULT_RESUME_ANCHOR_MAX,
+  appendResumeAnchorBlock,
+  buildSteerFoldHintMessage,
+  buildSteerClaimBatch,
+  buildSteerPreemptMeta,
+  countSteerFoldHints,
+  extractLatestHumanUserText,
+  isSteerFoldHint,
+  resolveSteerFoldHintText,
+  resolveSteerFoldHintTextWithAnchor,
+  truncateAnchor,
+  userMessagePlainText,
+  type SteerFoldBuildOptions,
+  type SteerFoldMode,
+  type SteerPreemptMeta,
+} from './steer-fold.ts'
+
 /**
  * Fiber states that cannot own or serve a new lifecycle.
  * Numeric literals avoid ambient const-enum access under isolatedModules
@@ -327,6 +349,27 @@ export interface Config {
    * `@deepseek-ai/dsh-agent-loop` steer semantics.
    */
   interruptOnSteer: boolean
+  /**
+   * When true (default), a preempting steer also enqueues a producer-owned
+   * fold notice: address the newest interrupt first, then resume the prior
+   * unfinished task. Closes the prompt-layer gap versus grok.com Bot
+   * "same Working absorbs OTHER". Set false for bare cancel-then-claim.
+   */
+  steerFoldHint: boolean
+  /**
+   * Fold notice verbosity when {@link steerFoldHint} is on.
+   * - `bot-like` (default): explicit two-phase contract (complete OTHER, then
+   *   finish prior task without omission).
+   * - `minimal`: shorter notice with the same ordering contract.
+   */
+  steerFoldMode: 'bot-like' | 'minimal'
+  /**
+   * When true (default), a preempting fold notice embeds a truncated copy of
+   * the unfinished MAIN human user text so the model resumes the exact prior
+   * deliverable in visible chat. Set false for 0.1.4-style notices without an
+   * explicit MAIN quote.
+   */
+  steerResumeAnchor: boolean
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -367,9 +410,15 @@ export class AgentLoop extends Service implements AgentFactory {
     agents?: Config['agents']
     maxParallelToolCalls?: number
     interruptOnSteer?: boolean
+    steerFoldHint?: boolean
+    steerFoldMode?: 'bot-like' | 'minimal'
+    steerResumeAnchor?: boolean
   }, Config> = z.object({
     maxParallelToolCalls: z.number().step(1).min(1).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS).volatile(),
     interruptOnSteer: z.boolean().default(true),
+    steerFoldHint: z.boolean().default(true),
+    steerFoldMode: z.union(['bot-like', 'minimal']).default('bot-like'),
+    steerResumeAnchor: z.boolean().default(true),
     agents: z.array(z.object({
       id: z.string().required(),
       sessionId: z.string().min(1),
@@ -384,6 +433,9 @@ export class AgentLoop extends Service implements AgentFactory {
     agents?: Config['agents']
     maxParallelToolCalls?: number
     interruptOnSteer?: boolean
+    steerFoldHint?: boolean
+    steerFoldMode?: 'bot-like' | 'minimal'
+    steerResumeAnchor?: boolean
   }, Config>
 
   /** Validated configuration owned by the agent-loop service. */
@@ -399,6 +451,9 @@ export class AgentLoop extends Service implements AgentFactory {
       agents: applyLauncherIdentities(config.agents, ctx.get(CONFIGURED_AGENT_IDENTITIES_KEY)),
       maxParallelToolCalls: config.maxParallelToolCalls,
       interruptOnSteer: config.interruptOnSteer,
+      steerFoldHint: config.steerFoldHint,
+      steerFoldMode: config.steerFoldMode ?? 'bot-like',
+      steerResumeAnchor: config.steerResumeAnchor !== false,
     }
     validateConfiguredAgents(this.config.agents)
     // Register only after every config validation above has passed, so a
