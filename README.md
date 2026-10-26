@@ -45,6 +45,9 @@ The package ships `cordis.patch.yml` that replaces Cordis id `agent-loop`:
     steerFoldHint: true
     steerFoldMode: bot-like
     steerResumeAnchor: true
+    rpwuEnabled: true
+    deliveryGate: true
+    deliveryGateMaxRetries: 2
     agents: []
 ```
 
@@ -75,6 +78,17 @@ Config flags:
 - `steerFoldHint` (default `true`) — after preempt, inject a producer notice: fully answer the newest interrupt, then finish the prior unfinished task without omission (prompt-layer fold vs grok.com Bot; does not rewrite user interrupt text)
 - `steerFoldMode` (default `bot-like`) — `bot-like` full two-phase copy; `minimal` shorter notice, same ordering contract
 - `steerResumeAnchor` (default `true`) — embed a truncated unfinished MAIN user quote in the fold notice so the model resumes the exact prior deliverable in visible chat; set `false` for 0.1.4-style notices
+- `rpwuEnabled` (default `true`) — RPWU P0 WorkUnit registry + step checkpoints + fold-into-unit; set `false` for ≈0.1.5 behavior
+- `deliveryGate` (default `true`, requires RPWU) — block unit completion on non-substantive / workspace-only delivery; inject chat continuations
+- `deliveryGateMaxRetries` (default `2`) — max DeliveryGate continuation injections per unit
+
+### 0.1.7 notes
+
+DeliveryGate substantive delivery: `text + tool` with progress-only narration (no code fence / short body) stays `workspaceOnly` so the gate still fires; sticky `chatPosted` from an earlier OTHER answer no longer skips MAIN tool dumps (`workspaceOnly` also gates). Default `deliveryGateMaxRetries` raised to **2**. Gate notice asks to paste MAIN code/progress into the visible reply.
+
+### 0.1.6 notes
+
+RPWU P0: in-memory WorkUnit registry, step checkpoints on step/end + preempt, fold-into-unit (unitId + goal in fold notice), DeliveryGate (≤1 chat continuation when `chatPosted` is false).
 
 ### 0.1.5 notes
 

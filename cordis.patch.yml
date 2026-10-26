@@ -19,4 +19,7 @@
         steerFoldHint: true
         steerFoldMode: bot-like
         steerResumeAnchor: true
+        rpwuEnabled: true
+        deliveryGate: true
+        deliveryGateMaxRetries: 2
         agents: []

@@ -50,6 +50,18 @@ import {
   type SteerFoldMode,
   type SteerPreemptMeta,
 } from './steer-fold.ts'
+import {
+  WorkUnitRegistry,
+  assistantPrefixStats,
+  buildDeliveryGateMeta,
+  buildDeliveryGateNotice,
+  buildUnitFoldBlock,
+  inferDeliveryFromBlocks,
+  shouldRunDeliveryGate,
+  type DeliveryGateMeta,
+  type StepCheckpoint,
+  type WorkUnit,
+} from './work-unit.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -197,7 +209,19 @@ export class ReactLoopAgent implements Agent {
    */
   lastSteerPreempt: SteerPreemptMeta | null = null
 
-    /** Whether interruptible busy-steer is enabled on the mounted loop config. */
+  /**
+   * RPWU P0: session-local WorkUnit registry (Agent lifetime, in-memory).
+   * Always allocated; disabled via config simply skips mutations beyond no-ops.
+   */
+  readonly workUnits = new WorkUnitRegistry()
+
+  /** Last step checkpoint written (tests / trajectory). */
+  lastCheckpoint: StepCheckpoint | null = null
+
+  /** Last DeliveryGate injection meta (tests / trajectory). */
+  lastDeliveryGate: DeliveryGateMeta | null = null
+
+  /** Whether interruptible busy-steer is enabled on the mounted loop config. */
   private interruptOnSteerEnabled(): boolean {
     const config = this.loopCtx.agentLoop?.config as { interruptOnSteer?: boolean } | undefined
     return config?.interruptOnSteer !== false
@@ -225,6 +249,27 @@ export class ReactLoopAgent implements Agent {
     return this.steerFoldHintEnabled()
   }
 
+  /** RPWU P0 master switch (default on). When false, behavior ≈0.1.5. */
+  private rpwuEnabled(): boolean {
+    const config = this.loopCtx.agentLoop?.config as { rpwuEnabled?: boolean } | undefined
+    return config?.rpwuEnabled !== false
+  }
+
+  /** DeliveryGate (default on when RPWU is on). */
+  private deliveryGateEnabled(): boolean {
+    if (!this.rpwuEnabled()) return false
+    const config = this.loopCtx.agentLoop?.config as { deliveryGate?: boolean } | undefined
+    return config?.deliveryGate !== false
+  }
+
+  /** Max DeliveryGate continuation injections per unit (default 2). */
+  private deliveryGateMaxRetries(): number {
+    const config = this.loopCtx.agentLoop?.config as { deliveryGateMaxRetries?: number } | undefined
+    const n = config?.deliveryGateMaxRetries
+    if (typeof n === 'number' && Number.isFinite(n) && n >= 0) return Math.floor(n)
+    return 2
+  }
+
   /**
    * Resolve truncated MAIN resume anchor from session history for a preempting
    * steer. Excludes producer notices and the OTHER text about to be claimed.
@@ -238,12 +283,138 @@ export class ReactLoopAgent implements Agent {
   }
 
   /** Messages to claim on next-step after a preempting steer (human OTHER, then fold). */
-  private steerClaimBatch(input: UserMessage, resumeAnchor?: string | null): UserMessage[] {
+  private steerClaimBatch(
+    input: UserMessage,
+    resumeAnchor?: string | null,
+    unit?: WorkUnit | null,
+  ): UserMessage[] {
     return buildSteerClaimBatch(input, {
       foldEnabled: this.steerFoldHintEnabled(),
       mode: this.steerFoldMode(),
       resumeAnchor,
+      unitId: unit?.id,
+      unitGoalSummary: unit?.goalSummary,
+      unitFoldBlock: unit ? buildUnitFoldBlock(unit) : null,
     })
+  }
+
+  /** Latest assistant text prefix stats from session events (for checkpoints). */
+  private latestAssistantPrefixStats(): { cursor: number; hash: string; text: string } {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const events = this.session.snapshotEvents()
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]
+      if (event?.type !== 'assistant/message') continue
+      const content = event.data.message.content as readonly { type: string; text?: string }[]
+      return assistantPrefixStats(content)
+    }
+    return { cursor: 0, hash: assistantPrefixStats([]).hash, text: '' }
+  }
+
+  /** Collect recent tool result refs from the current step window (best-effort). */
+  private recentToolResultRefs(turn: number, step: number): { id: string; summary?: string }[] {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const events = this.session.snapshotEvents()
+    const refs: { id: string; summary?: string }[] = []
+    for (const event of events) {
+      if (event.type !== 'tool/result') continue
+      const data = event.data as { turn?: number; step?: number; toolCallId?: string; name?: string }
+      if (data.turn !== undefined && data.turn !== turn) continue
+      if (data.step !== undefined && data.step !== step) continue
+      refs.push({
+        id: data.toolCallId ?? `tool-${refs.length + 1}`,
+        summary: data.name,
+      })
+    }
+    return refs
+  }
+
+  /**
+   * RPWU: write a step-end checkpoint for the active unit and optionally
+   * inject one DeliveryGate continuation when chat delivery is missing.
+   */
+  private recordStepCheckpointAndMaybeGate(
+    turn: number,
+    step: number,
+    blocks: readonly { type: string; text?: string }[],
+    stepCompleted: boolean,
+  ): void {
+    if (!this.rpwuEnabled()) return
+    let unit = this.workUnits.active()
+    if (!unit) {
+      // Lazy-bind MAIN from latest human if a turn is running without preempt yet.
+      const goal = extractLatestHumanUserText(this.session) ?? 'unspecified MAIN'
+      unit = this.workUnits.ensureMainUnit({
+        goalSummary: goal,
+        turn,
+        step,
+        status: 'running',
+      })
+    } else if (unit.status === 'paused' || unit.status === 'pending') {
+      this.workUnits.markStatus(unit.id, 'running')
+    }
+
+    const delivery = inferDeliveryFromBlocks(blocks)
+    // Sticky chatPosted: once true, stay true across later steps.
+    // workspaceOnly: set when this step is tool/progress-only; clear on substantive chat.
+    const merged = {
+      chatPosted: unit.delivery.chatPosted || delivery.chatPosted,
+      workspaceOnly: delivery.chatPosted
+        ? false
+        : (delivery.workspaceOnly || unit.delivery.workspaceOnly),
+    }
+    this.workUnits.updateDelivery(unit.id, merged)
+    const prefix = assistantPrefixStats(blocks)
+    // Prefer cumulative cursor when this step had little text but prior had more.
+    const priorCursor = unit.checkpoints.at(-1)?.assistantPrefixCursor ?? 0
+    const cursor = Math.max(prefix.cursor, priorCursor)
+    const cp = this.workUnits.appendCheckpoint({
+      unitId: unit.id,
+      stepIndex: step,
+      turn,
+      assistantPrefixCursor: cursor,
+      assistantPrefixHash: prefix.hash || unit.checkpoints.at(-1)?.assistantPrefixHash || '00000000',
+      toolResultRefs: this.recentToolResultRefs(turn, step),
+      status: 'running',
+      delivery: merged,
+      reason: 'step-end',
+    })
+    this.lastCheckpoint = cp
+
+    if (!stepCompleted) return
+
+    // DeliveryGate: one continuation if still no chat-visible delivery.
+    const fresh = this.workUnits.get(unit.id)!
+    const gateOpts = {
+      enabled: this.deliveryGateEnabled(),
+      maxRetries: this.deliveryGateMaxRetries(),
+    }
+    if (shouldRunDeliveryGate(fresh, gateOpts)) {
+      this.workUnits.bumpGateRetry(fresh.id)
+      this.inbox.splice('next-step', Infinity, 0, [buildDeliveryGateNotice(fresh)])
+      this.lastDeliveryGate = buildDeliveryGateMeta(fresh, true)
+      const gateCp = this.workUnits.appendCheckpoint({
+        unitId: fresh.id,
+        stepIndex: step,
+        turn,
+        assistantPrefixCursor: cursor,
+        assistantPrefixHash: cp.assistantPrefixHash,
+        toolResultRefs: [],
+        status: 'running',
+        delivery: { ...fresh.delivery },
+        reason: 'gate',
+      })
+      this.lastCheckpoint = gateCp
+      return
+    }
+
+    // Try complete only when gate allows and inbox is empty after this step.
+    if (this.inbox.nextStep.length === 0) {
+      this.workUnits.tryComplete(unit.id, {
+        deliveryGate: this.deliveryGateEnabled(),
+        maxRetries: this.deliveryGateMaxRetries(),
+      })
+    }
   }
 
   /** Snapshot used by the pure dual-lane scheduler. */
@@ -273,13 +444,47 @@ export class ReactLoopAgent implements Agent {
       const mode = foldEnabled ? this.steerFoldMode() : null
       // Snapshot MAIN before OTHER is claimed into the next-step inbox / session.
       const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
-      const batch = this.steerClaimBatch(input, resumeAnchor)
+      // RPWU P0: bind/create MAIN unit and fold OTHER into it (no fork).
+      let boundUnit: WorkUnit | null = null
+      if (this.rpwuEnabled()) {
+        const turn = this.phase.kind === 'running' ? this.phase.turn : 0
+        const step = this.phase.kind === 'running' ? this.phase.step : 0
+        const goalText = resumeAnchor
+          ?? extractLatestHumanUserText(this.session, {
+            excludeText: userMessagePlainText(input),
+          })
+          ?? 'unspecified MAIN'
+        boundUnit = this.workUnits.ensureMainUnit({
+          goalSummary: goalText,
+          turn,
+          step,
+          status: 'paused',
+        })
+        const otherText = userMessagePlainText(input) ?? 'OTHER'
+        this.workUnits.foldOther(boundUnit.id, otherText)
+        const prefix = this.latestAssistantPrefixStats()
+        const cp = this.workUnits.appendCheckpoint({
+          unitId: boundUnit.id,
+          stepIndex: step,
+          turn,
+          assistantPrefixCursor: prefix.cursor,
+          assistantPrefixHash: prefix.hash,
+          toolResultRefs: [],
+          status: 'paused',
+          delivery: { ...boundUnit.delivery },
+          reason: 'preempt',
+        })
+        this.lastCheckpoint = cp
+      }
+      const batch = this.steerClaimBatch(input, resumeAnchor, boundUnit)
       this.inbox.splice('next-step', Infinity, 0, batch)
       // Trajectory-friendly preempt marker (not a user chat bubble; no full MAIN text).
       this.lastSteerPreempt = buildSteerPreemptMeta({
         foldInjected: foldEnabled,
         mode,
         resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
+        unitId: boundUnit?.id ?? null,
+        unitFoldPresent: boundUnit !== null,
       })
       // 3) Latch wake so kick() restarts after the aborted activity drains.
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = true
@@ -672,13 +877,35 @@ export class ReactLoopAgent implements Agent {
             stream: live.stream,
           }, { surfaceOp: 'append' }).seq,
         )
-        if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
+        if (finish.kind === 'max-tokens') {
+          this.recordStepCheckpointAndMaybeGate(
+            turn,
+            step,
+            message.content as readonly { type: string; text?: string }[],
+            true,
+          )
+          return { kind: 'max-tokens' }
+        }
 
         const toolCalls = message.content.filter(block => block.type === 'tool-call')
-        if (toolCalls.length === 0) return { kind: 'completed' }
+        if (toolCalls.length === 0) {
+          this.recordStepCheckpointAndMaybeGate(
+            turn,
+            step,
+            message.content as readonly { type: string; text?: string }[],
+            true,
+          )
+          return { kind: 'completed' }
+        }
         const { concluded } = await executeToolCalls(
           this.loopCtx, turn, step, toolCalls, signal,
           context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
+        )
+        this.recordStepCheckpointAndMaybeGate(
+          turn,
+          step,
+          message.content as readonly { type: string; text?: string }[],
+          concluded,
         )
         return concluded ? { kind: 'completed' } : null
       } catch (error: unknown) {

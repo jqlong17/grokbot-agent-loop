@@ -126,13 +126,26 @@ describe('steer-fold hint', () => {
       claimOrder: ['human', 'fold-hint'],
       marker: STEER_FOLD_HINT_MARKER,
       resumeAnchorPresent: true,
+      unitId: null,
+      unitFoldPresent: false,
     })
+    const withUnit = buildSteerPreemptMeta({
+      foldInjected: true,
+      mode: 'bot-like',
+      resumeAnchorPresent: true,
+      unitId: 'wu-1',
+      unitFoldPresent: true,
+    })
+    expect(withUnit.unitId).toBe('wu-1')
+    expect(withUnit.unitFoldPresent).toBe(true)
     const bare = buildSteerPreemptMeta({ foldInjected: false, mode: 'bot-like' })
     expect(bare.foldInjected).toBe(false)
     expect(bare.mode).toBeNull()
     expect(bare.claimOrder).toEqual(['human'])
     expect(bare.marker).toBeNull()
     expect(bare.resumeAnchorPresent).toBe(false)
+    expect(bare.unitId).toBeNull()
+    expect(bare.unitFoldPresent).toBe(false)
   })
 
   it('does not classify ordinary human messages as fold hints', () => {
@@ -141,6 +154,27 @@ describe('steer-fold hint', () => {
       source: { kind: 'user' },
     })
     expect(isSteerFoldHint(human)).toBe(false)
+  })
+
+  it('embeds unit fold block with unitId when provided', () => {
+    const msg = buildSteerFoldHintMessage({
+      mode: 'bot-like',
+      resumeAnchor: 'write CLI',
+      unitId: 'wu-9',
+      unitGoalSummary: 'write CLI',
+    })
+    const text = msg.content[0]?.type === 'text' ? msg.content[0].text : ''
+    expect(text).toContain('[grokbot-unit-fold]')
+    expect(text).toContain('wu-9')
+    expect(text).toContain('write CLI')
+    const batch = buildSteerClaimBatch(
+      createUserMessage({ content: [{ type: 'text', text: 'pack' }], source: { kind: 'user' } }),
+      { foldEnabled: true, resumeAnchor: 'write CLI', unitId: 'wu-9', unitGoalSummary: 'write CLI' },
+    )
+    expect(batch).toHaveLength(2)
+    const foldText = batch[1]!.content[0]?.type === 'text' ? batch[1]!.content[0].text : ''
+    expect(foldText).toContain('[grokbot-unit-fold]')
+    expect(foldText).toContain('wu-9')
   })
 
   it('embeds truncated MAIN resume anchor in fold notice when provided', () => {

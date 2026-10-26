@@ -37,6 +37,12 @@ export interface SteerFoldBuildOptions {
   mode?: SteerFoldMode
   /** Truncated unfinished MAIN user text; omitted/null → 0.1.4-style notice. */
   resumeAnchor?: string | null
+  /** RPWU P0: bound MAIN unit id embedded in fold notice. */
+  unitId?: string | null
+  /** RPWU P0: bound MAIN goal summary embedded in fold notice. */
+  unitGoalSummary?: string | null
+  /** Optional prebuilt unit-fold block (includes marker). */
+  unitFoldBlock?: string | null
 }
 
 /**
@@ -145,12 +151,24 @@ export function appendResumeAnchorBlock(baseText: string, resumeAnchor?: string 
   )
 }
 
+/** Append RPWU unit-fold block when present (0.1.6+). */
+export function appendUnitFoldBlock(baseText: string, unitFoldBlock?: string | null): string {
+  if (unitFoldBlock === undefined || unitFoldBlock === null || unitFoldBlock.length === 0) {
+    return baseText
+  }
+  return `${baseText} ${unitFoldBlock}`
+}
+
 /** Resolve full fold notice text including optional MAIN anchor. */
 export function resolveSteerFoldHintTextWithAnchor(
   mode: SteerFoldMode = 'bot-like',
   resumeAnchor?: string | null,
+  unitFoldBlock?: string | null,
 ): string {
-  return appendResumeAnchorBlock(resolveSteerFoldHintText(mode), resumeAnchor)
+  return appendUnitFoldBlock(
+    appendResumeAnchorBlock(resolveSteerFoldHintText(mode), resumeAnchor),
+    unitFoldBlock,
+  )
 }
 
 /**
@@ -163,20 +181,37 @@ export function buildSteerFoldHintMessage(
   const options: SteerFoldBuildOptions =
     typeof modeOrOptions === 'string' ? { mode: modeOrOptions } : modeOrOptions
   const mode = options.mode ?? 'bot-like'
-  const text = resolveSteerFoldHintTextWithAnchor(mode, options.resumeAnchor)
+  const unitFoldBlock = options.unitFoldBlock
+    ?? (options.unitId
+      ? `[grokbot-unit-fold] Bound MAIN work unit ${options.unitId}`
+        + (options.unitGoalSummary ? ` (goal: ${options.unitGoalSummary})` : '')
+        + `. Fold OTHER into this unit; keep step checkpoints; resume from the last completed step. `
+        + `Visible chat delivery is required before this unit can complete.`
+      : null)
+  const text = resolveSteerFoldHintTextWithAnchor(mode, options.resumeAnchor, unitFoldBlock)
   const hasAnchor = Boolean(options.resumeAnchor && options.resumeAnchor.length > 0)
+  const hasUnit = Boolean(unitFoldBlock && unitFoldBlock.length > 0)
+  const summary = hasUnit
+    ? (hasAnchor
+      ? mode === 'minimal'
+        ? 'Steer fold (minimal+anchor+unit): OTHER then anchored MAIN on bound unit'
+        : 'Steer fold (bot-like+anchor+unit): chat dual delivery on bound MAIN unit'
+      : mode === 'minimal'
+        ? 'Steer fold (minimal+unit): OTHER then prior task on bound unit'
+        : 'Steer fold (bot-like+unit): chat dual delivery on bound MAIN unit')
+    : hasAnchor
+      ? mode === 'minimal'
+        ? 'Steer fold (minimal+anchor): OTHER in chat, then anchored MAIN dual delivery'
+        : 'Steer fold (bot-like+anchor): chat-inline dual delivery — OTHER then anchored MAIN'
+      : mode === 'minimal'
+        ? 'Steer fold (minimal): complete newest interrupt in chat, then finish prior task'
+        : 'Steer fold (bot-like): chat-inline dual delivery — OTHER then MAIN without omission'
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: {
       kind: 'steer-fold-hint',
       form: 'notice',
-      summary: hasAnchor
-        ? mode === 'minimal'
-          ? 'Steer fold (minimal+anchor): OTHER in chat, then anchored MAIN dual delivery'
-          : 'Steer fold (bot-like+anchor): chat-inline dual delivery — OTHER then anchored MAIN'
-        : mode === 'minimal'
-          ? 'Steer fold (minimal): complete newest interrupt in chat, then finish prior task'
-          : 'Steer fold (bot-like): chat-inline dual delivery — OTHER then MAIN without omission',
+      summary,
     },
   })
 }
@@ -192,6 +227,9 @@ export function buildSteerClaimBatch(
     foldEnabled: boolean
     mode?: SteerFoldMode
     resumeAnchor?: string | null
+    unitId?: string | null
+    unitGoalSummary?: string | null
+    unitFoldBlock?: string | null
   } = { foldEnabled: true },
 ): UserMessage[] {
   if (!options.foldEnabled) return [input]
@@ -200,6 +238,9 @@ export function buildSteerClaimBatch(
     buildSteerFoldHintMessage({
       mode: options.mode ?? 'bot-like',
       resumeAnchor: options.resumeAnchor,
+      unitId: options.unitId,
+      unitGoalSummary: options.unitGoalSummary,
+      unitFoldBlock: options.unitFoldBlock,
     }),
   ]
 }
@@ -227,6 +268,10 @@ export interface SteerPreemptMeta {
   readonly marker: typeof STEER_FOLD_HINT_MARKER | null
   /** Whether a MAIN resume anchor was embedded in the fold notice (0.1.5+). */
   readonly resumeAnchorPresent: boolean
+  /** RPWU P0: bound MAIN unit id when fold-into-unit ran (0.1.6+). */
+  readonly unitId: string | null
+  /** RPWU P0: whether a unit-fold marker was embedded. */
+  readonly unitFoldPresent: boolean
 }
 
 /** Build a trajectory-friendly preempt meta record. */
@@ -234,6 +279,8 @@ export function buildSteerPreemptMeta(options: {
   foldInjected: boolean
   mode: SteerFoldMode | null
   resumeAnchorPresent?: boolean
+  unitId?: string | null
+  unitFoldPresent?: boolean
 }): SteerPreemptMeta {
   const claimOrder: Array<'human' | 'fold-hint'> = options.foldInjected
     ? ['human', 'fold-hint']
@@ -245,5 +292,7 @@ export function buildSteerPreemptMeta(options: {
     claimOrder,
     marker: options.foldInjected ? STEER_FOLD_HINT_MARKER : null,
     resumeAnchorPresent: options.foldInjected ? Boolean(options.resumeAnchorPresent) : false,
+    unitId: options.foldInjected ? (options.unitId ?? null) : null,
+    unitFoldPresent: options.foldInjected ? Boolean(options.unitFoldPresent) : false,
   }
 }

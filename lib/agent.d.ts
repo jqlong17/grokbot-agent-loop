@@ -11,6 +11,7 @@ import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { ReactLoopInbox } from './inbox.ts';
 import { type SteerPreemptMeta } from './steer-fold.ts';
+import { WorkUnitRegistry, type DeliveryGateMeta, type StepCheckpoint } from './work-unit.ts';
 /** Drives one session through turn and step boundaries. */
 export declare class ReactLoopAgent implements Agent {
     private loopCtx;
@@ -56,6 +57,15 @@ export declare class ReactLoopAgent implements Agent {
      * Not a user-visible chat event; fold notice remains the prompt hook.
      */
     lastSteerPreempt: SteerPreemptMeta | null;
+    /**
+     * RPWU P0: session-local WorkUnit registry (Agent lifetime, in-memory).
+     * Always allocated; disabled via config simply skips mutations beyond no-ops.
+     */
+    readonly workUnits: WorkUnitRegistry;
+    /** Last step checkpoint written (tests / trajectory). */
+    lastCheckpoint: StepCheckpoint | null;
+    /** Last DeliveryGate injection meta (tests / trajectory). */
+    lastDeliveryGate: DeliveryGateMeta | null;
     /** Whether interruptible busy-steer is enabled on the mounted loop config. */
     private interruptOnSteerEnabled;
     /** Whether to inject the continue-prior fold notice after a preempting steer. */
@@ -64,6 +74,12 @@ export declare class ReactLoopAgent implements Agent {
     private steerFoldMode;
     /** Whether to embed unfinished MAIN text into the fold notice (0.1.5+). */
     private steerResumeAnchorEnabled;
+    /** RPWU P0 master switch (default on). When false, behavior ≈0.1.5. */
+    private rpwuEnabled;
+    /** DeliveryGate (default on when RPWU is on). */
+    private deliveryGateEnabled;
+    /** Max DeliveryGate continuation injections per unit (default 2). */
+    private deliveryGateMaxRetries;
     /**
      * Resolve truncated MAIN resume anchor from session history for a preempting
      * steer. Excludes producer notices and the OTHER text about to be claimed.
@@ -71,6 +87,15 @@ export declare class ReactLoopAgent implements Agent {
     private resolveSteerResumeAnchor;
     /** Messages to claim on next-step after a preempting steer (human OTHER, then fold). */
     private steerClaimBatch;
+    /** Latest assistant text prefix stats from session events (for checkpoints). */
+    private latestAssistantPrefixStats;
+    /** Collect recent tool result refs from the current step window (best-effort). */
+    private recentToolResultRefs;
+    /**
+     * RPWU: write a step-end checkpoint for the active unit and optionally
+     * inject one DeliveryGate continuation when chat delivery is missing.
+     */
+    private recordStepCheckpointAndMaybeGate;
     /** Snapshot used by the pure dual-lane scheduler. */
     private schedulerState;
     /**

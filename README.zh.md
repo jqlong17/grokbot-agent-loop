@@ -65,6 +65,20 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - `steerFoldHint`（默认 `true`）— 抢占后注入「先完整回答最新插话，再无省略续写被打断主任务；优先同一条可见对话双交付」的 producer notice（对齐 grok.com Bot；不污染用户插话文案）
 - `steerFoldMode`（默认 `bot-like`）— `bot-like` 用完整两阶段契约文案；`minimal` 用更短 notice，顺序契约相同
 - `steerResumeAnchor`（默认 `true`）— 抢占 fold notice 嵌入未完成 MAIN 用户原文摘要（≤1200 字），强制同一条可见对话里续写；`false` 时≈0.1.4（无锚点引用）
+- `rpwuEnabled`（默认 `true`）— RPWU P0：会话内 WorkUnit 注册表 + step checkpoint + fold-into-unit；`false` 时≈0.1.5
+- `deliveryGate`（默认 `true`，依赖 RPWU）— 非实质/仅 workspace 交付时不让 unit 完成，注入对话续写
+- `deliveryGateMaxRetries`（默认 `2`）— 每个 unit 最多 DeliveryGate 续跑次数
+
+### 0.1.7 改动摘要
+
+- **DeliveryGate 实质交付**：同一步 `短文/进度旁白 + tool` 仍视为未 chat-deliver（`workspaceOnly`），会触发 gate；先 OTHER 后 MAIN 工具落盘时，sticky `chatPosted` 不再跳过 gate
+- **`deliveryGateMaxRetries` 默认 2**；gate 文案明确要求把 MAIN 代码/进度贴进可见回复
+- 仍可 `deliveryGate:false` / `rpwuEnabled:false` 回退
+
+### 0.1.6 改动摘要
+
+- **RPWU P0**：内存 WorkUnit Registry、step/end + 抢占 checkpoint、fold-into-unit（fold 含 unitId/goal）、DeliveryGate（`chatPosted===false` 时最多 1 次对话续写）
+- 保留 0.1.5 MAIN 锚点与 0.1.4 chat-inline dual delivery
 
 ### 0.1.5 改动摘要
 

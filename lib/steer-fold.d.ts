@@ -33,6 +33,12 @@ export interface SteerFoldBuildOptions {
     mode?: SteerFoldMode;
     /** Truncated unfinished MAIN user text; omitted/null → 0.1.4-style notice. */
     resumeAnchor?: string | null;
+    /** RPWU P0: bound MAIN unit id embedded in fold notice. */
+    unitId?: string | null;
+    /** RPWU P0: bound MAIN goal summary embedded in fold notice. */
+    unitGoalSummary?: string | null;
+    /** Optional prebuilt unit-fold block (includes marker). */
+    unitFoldBlock?: string | null;
 }
 /**
  * Bot-like (default): explicit two-phase contract matching grok.com Bot
@@ -67,8 +73,10 @@ export declare function extractLatestHumanUserText(source: {
 }): string | null;
 /** Append MAIN resume-anchor block when present. */
 export declare function appendResumeAnchorBlock(baseText: string, resumeAnchor?: string | null): string;
+/** Append RPWU unit-fold block when present (0.1.6+). */
+export declare function appendUnitFoldBlock(baseText: string, unitFoldBlock?: string | null): string;
 /** Resolve full fold notice text including optional MAIN anchor. */
-export declare function resolveSteerFoldHintTextWithAnchor(mode?: SteerFoldMode, resumeAnchor?: string | null): string;
+export declare function resolveSteerFoldHintTextWithAnchor(mode?: SteerFoldMode, resumeAnchor?: string | null, unitFoldBlock?: string | null): string;
 /**
  * Build the next-step companion notice for a preempting steer.
  * Accepts either a mode string (0.1.4 back-compat) or {@link SteerFoldBuildOptions}.
@@ -83,6 +91,9 @@ export declare function buildSteerClaimBatch(input: UserMessage, options?: {
     foldEnabled: boolean;
     mode?: SteerFoldMode;
     resumeAnchor?: string | null;
+    unitId?: string | null;
+    unitGoalSummary?: string | null;
+    unitFoldBlock?: string | null;
 }): UserMessage[];
 /** True when a message is our fold-hint notice (not a human utterance). */
 export declare function isSteerFoldHint(message: UserMessage): boolean;
@@ -101,11 +112,17 @@ export interface SteerPreemptMeta {
     readonly marker: typeof STEER_FOLD_HINT_MARKER | null;
     /** Whether a MAIN resume anchor was embedded in the fold notice (0.1.5+). */
     readonly resumeAnchorPresent: boolean;
+    /** RPWU P0: bound MAIN unit id when fold-into-unit ran (0.1.6+). */
+    readonly unitId: string | null;
+    /** RPWU P0: whether a unit-fold marker was embedded. */
+    readonly unitFoldPresent: boolean;
 }
 /** Build a trajectory-friendly preempt meta record. */
 export declare function buildSteerPreemptMeta(options: {
     foldInjected: boolean;
     mode: SteerFoldMode | null;
     resumeAnchorPresent?: boolean;
+    unitId?: string | null;
+    unitFoldPresent?: boolean;
 }): SteerPreemptMeta;
 //# sourceMappingURL=steer-fold.d.ts.map
