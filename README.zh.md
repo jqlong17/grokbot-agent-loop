@@ -2,7 +2,7 @@
 
 **面向 [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness)（dsh）的可打断双车道 agent-loop 插件。**
 
-> **声明：** 仅社区致敬命名。**与 xAI / Grok Bot 无任何隶属、背书或赞助关系。** 独立 MIT 插件：禁用官方 `agent-loop` 行并插入自有 Cordis 条目（不可对已有 id 改 `name`）。
+> **声明：** 仅社区致敬命名。**与 xAI / Grok Bot 无任何隶属、背书或赞助关系。** 独立 MIT 插件，通过 Cordis id `agent-loop` 替换官方 `@deepseek-ai/dsh-agent-loop`。
 
 [English](./README.md) | 中文
 
@@ -30,30 +30,21 @@
 dsh plugin --profile web add github:jqlong17/grokbot-agent-loop
 ```
 
-Cordis **不能**修改已有 id 的 `name`（同 id 改名会被 `name mismatch` 跳过）。包内 `cordis.patch.yml` 因此 **禁用** 官方 `agent-loop`，再 **insert** 新行：
+包内 `cordis.patch.yml` 会按 id 替换 `agent-loop`：
 
 ```yaml
 - id: agent-loop
-  disabled: true
-
-- insert:
-    - id: grokbot-agent-loop
-      name: '@harness-plugins/grokbot-agent-loop'
-      config:
-        maxParallelToolCalls: 10
-        interruptOnSteer: true
-        agents: []
+  name: '@harness-plugins/grokbot-agent-loop'
+  config:
+    maxParallelToolCalls: 10
+    interruptOnSteer: true
+    steerFoldHint: true
+    steerFoldMode: bot-like
+    steerResumeAnchor: true
+    agents: []
 ```
 
-`AgentFactory` 由本包在新行加载时注册，不依赖官方条目 id。完整示例见 [`examples/cordis.patch.yml`](./examples/cordis.patch.yml)。
-
-### 验证
-
-```sh
-dsh web --dump-config
-```
-
-期望：无 `name mismatch` 警告；官方 `agent-loop` 为 `disabled: true`；存在 `grokbot-agent-loop` 且 `name` 为本包。
+完整示例见 [`examples/cordis.patch.yml`](./examples/cordis.patch.yml)。
 
 ### 卸载 / 恢复官方 loop
 
@@ -61,7 +52,7 @@ dsh web --dump-config
 dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 ```
 
-或从 profile 的 `cordis.patch.yml` 删掉 disable + `grokbot-agent-loop` insert，使 `@deepseek-ai/dsh-base` 中的官方 `agent-loop` 重新启用。
+或从 profile 的 `cordis.patch.yml` 删掉对 `agent-loop` 的覆盖，使 `@deepseek-ai/dsh-base` 中的官方 `name` 重新生效。
 
 ## 忙时 Enter 与排队快捷键
 
@@ -69,7 +60,41 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 2. GrokBot Loop 会对进行中的 step **抢占取消**，而不是等待或丢进 QueueDock。
 3. **Cmd/Ctrl+Enter** 仍走 `agent.followup()` → **next-turn 排队**。
 
-配置项：`interruptOnSteer`（默认 `true`）。设为 `false` 可在保持本包挂载的同时恢复官方 steer 等待语义。
+配置项：
+- `interruptOnSteer`（默认 `true`）— 设为 `false` 恢复官方 steer 等待语义
+- `steerFoldHint`（默认 `true`）— 抢占后注入「先完整回答最新插话，再无省略续写被打断主任务；优先同一条可见对话双交付」的 producer notice（对齐 grok.com Bot；不污染用户插话文案）
+- `steerFoldMode`（默认 `bot-like`）— `bot-like` 用完整两阶段契约文案；`minimal` 用更短 notice，顺序契约相同
+- `steerResumeAnchor`（默认 `true`）— 抢占 fold notice 嵌入未完成 MAIN 用户原文摘要（≤1200 字），强制同一条可见对话里续写；`false` 时≈0.1.4（无锚点引用）
+- `rpwuEnabled`（默认 `true`）— RPWU P0：会话内 WorkUnit 注册表 + step checkpoint + fold-into-unit；`false` 时≈0.1.5
+- `deliveryGate`（默认 `true`，依赖 RPWU）— 非实质/仅 workspace 交付时不让 unit 完成，注入对话续写
+- `deliveryGateMaxRetries`（默认 `2`）— 每个 unit 最多 DeliveryGate 续跑次数
+
+### 0.1.7 改动摘要
+
+- **DeliveryGate 实质交付**：同一步 `短文/进度旁白 + tool` 仍视为未 chat-deliver（`workspaceOnly`），会触发 gate；先 OTHER 后 MAIN 工具落盘时，sticky `chatPosted` 不再跳过 gate
+- **`deliveryGateMaxRetries` 默认 2**；gate 文案明确要求把 MAIN 代码/进度贴进可见回复
+- 仍可 `deliveryGate:false` / `rpwuEnabled:false` 回退
+
+### 0.1.6 改动摘要
+
+- **RPWU P0**：内存 WorkUnit Registry、step/end + 抢占 checkpoint、fold-into-unit（fold 含 unitId/goal）、DeliveryGate（`chatPosted===false` 时最多 1 次对话续写）
+- 保留 0.1.5 MAIN 锚点与 0.1.4 chat-inline dual delivery
+
+### 0.1.5 改动摘要
+
+- 新增 **MAIN 续写锚点**（`steerResumeAnchor`）：抢占时把未完成主任务原文嵌进 fold notice，并收紧「对话内必须双交付」契约
+- 保留 0.1.4 chat-inline dual delivery 与 0.1.3 顺序/meta
+
+### 0.1.4 改动摘要
+
+- fold 文案补 **chat-inline dual delivery**：优先在同一条可见对话流里先交 OTHER、再续写 MAIN；勿把仅工作区/工具落盘当完成（除非用户明确要求）
+- 保留 0.1.3：`steerFoldMode`、human→fold 顺序、`lastSteerPreempt`
+
+### 0.1.3 改动摘要
+
+- 强化 fold 文案（禁止暗示可放弃主任务）；固定 claim 顺序：用户插话在前 / fold notice 紧随
+- 新增 `steerFoldMode: bot-like | minimal`
+- 抢占成功写入 `lastSteerPreempt` 轨迹友好标记（非用户可见气泡）
 
 ## 架构
 

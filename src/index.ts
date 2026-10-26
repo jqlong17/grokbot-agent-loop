@@ -50,6 +50,60 @@ export {
   type SchedulerState,
 } from './scheduler.ts'
 
+export {
+  STEER_FOLD_HINT_MARKER,
+  STEER_FOLD_HINT_TEXT,
+  STEER_FOLD_HINT_TEXT_BOT_LIKE,
+  STEER_FOLD_HINT_TEXT_MINIMAL,
+  DEFAULT_RESUME_ANCHOR_MAX,
+  appendResumeAnchorBlock,
+  appendUnitFoldBlock,
+  buildSteerFoldHintMessage,
+  buildSteerClaimBatch,
+  buildSteerPreemptMeta,
+  countSteerFoldHints,
+  extractLatestHumanUserText,
+  isSteerFoldHint,
+  resolveSteerFoldHintText,
+  resolveSteerFoldHintTextWithAnchor,
+  truncateAnchor,
+  userMessagePlainText,
+  type SteerFoldBuildOptions,
+  type SteerFoldMode,
+  type SteerPreemptMeta,
+} from './steer-fold.ts'
+
+export {
+  WorkUnitRegistry,
+  UNIT_FOLD_MARKER,
+  DELIVERY_GATE_MARKER,
+  DEFAULT_DELIVERY_GATE_MAX,
+  DEFAULT_SUBSTANTIVE_MIN_CHARS,
+  DEFAULT_GOAL_SUMMARY_MAX,
+  assistantPrefixStats,
+  buildDeliveryGateMeta,
+  buildDeliveryGateNotice,
+  buildUnitFoldBlock,
+  canMarkCompleted,
+  inferDeliveryFromBlocks,
+  isDeliveryGateNotice,
+  isSubstantiveAssistantText,
+  shouldRunDeliveryGate,
+  simpleTextHash,
+  summarizeGoal,
+  type CheckpointReason,
+  type CreateWorkUnitInput,
+  type DeliveryGateMeta,
+  type InferDeliveryOptions,
+  type StepCheckpoint,
+  type ToolResultRef,
+  type WorkUnit,
+  type WorkUnitDelivery,
+  type WorkUnitLane,
+  type WorkUnitSnapshot,
+  type WorkUnitStatus,
+} from './work-unit.ts'
+
 /**
  * Fiber states that cannot own or serve a new lifecycle.
  * Numeric literals avoid ambient const-enum access under isolatedModules
@@ -327,6 +381,42 @@ export interface Config {
    * `@deepseek-ai/dsh-agent-loop` steer semantics.
    */
   interruptOnSteer: boolean
+  /**
+   * When true (default), a preempting steer also enqueues a producer-owned
+   * fold notice: address the newest interrupt first, then resume the prior
+   * unfinished task. Closes the prompt-layer gap versus grok.com Bot
+   * "same Working absorbs OTHER". Set false for bare cancel-then-claim.
+   */
+  steerFoldHint: boolean
+  /**
+   * Fold notice verbosity when {@link steerFoldHint} is on.
+   * - `bot-like` (default): explicit two-phase contract (complete OTHER, then
+   *   finish prior task without omission).
+   * - `minimal`: shorter notice with the same ordering contract.
+   */
+  steerFoldMode: 'bot-like' | 'minimal'
+  /**
+   * When true (default), a preempting fold notice embeds a truncated copy of
+   * the unfinished MAIN human user text so the model resumes the exact prior
+   * deliverable in visible chat. Set false for 0.1.4-style notices without an
+   * explicit MAIN quote.
+   */
+  steerResumeAnchor: boolean
+  /**
+   * RPWU P0 master switch (default true). When false, skip WorkUnit registry
+   * mutations / DeliveryGate (behavior ≈0.1.5).
+   */
+  rpwuEnabled: boolean
+  /**
+   * When true (default, requires rpwuEnabled), a unit cannot complete on
+   * workspace-only / non-substantive delivery; inject chat-visible continuations.
+   */
+  deliveryGate: boolean
+  /**
+   * Max DeliveryGate continuation injections per unit (default 2).
+   * Set 0 to never inject (still blocks complete while chatPosted is false).
+   */
+  deliveryGateMaxRetries: number
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -367,9 +457,21 @@ export class AgentLoop extends Service implements AgentFactory {
     agents?: Config['agents']
     maxParallelToolCalls?: number
     interruptOnSteer?: boolean
+    steerFoldHint?: boolean
+    steerFoldMode?: 'bot-like' | 'minimal'
+    steerResumeAnchor?: boolean
+    rpwuEnabled?: boolean
+    deliveryGate?: boolean
+    deliveryGateMaxRetries?: number
   }, Config> = z.object({
     maxParallelToolCalls: z.number().step(1).min(1).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS).volatile(),
     interruptOnSteer: z.boolean().default(true),
+    steerFoldHint: z.boolean().default(true),
+    steerFoldMode: z.union(['bot-like', 'minimal']).default('bot-like'),
+    steerResumeAnchor: z.boolean().default(true),
+    rpwuEnabled: z.boolean().default(true),
+    deliveryGate: z.boolean().default(true),
+    deliveryGateMaxRetries: z.number().step(1).min(0).default(2),
     agents: z.array(z.object({
       id: z.string().required(),
       sessionId: z.string().min(1),
@@ -384,6 +486,12 @@ export class AgentLoop extends Service implements AgentFactory {
     agents?: Config['agents']
     maxParallelToolCalls?: number
     interruptOnSteer?: boolean
+    steerFoldHint?: boolean
+    steerFoldMode?: 'bot-like' | 'minimal'
+    steerResumeAnchor?: boolean
+    rpwuEnabled?: boolean
+    deliveryGate?: boolean
+    deliveryGateMaxRetries?: number
   }, Config>
 
   /** Validated configuration owned by the agent-loop service. */
@@ -399,6 +507,14 @@ export class AgentLoop extends Service implements AgentFactory {
       agents: applyLauncherIdentities(config.agents, ctx.get(CONFIGURED_AGENT_IDENTITIES_KEY)),
       maxParallelToolCalls: config.maxParallelToolCalls,
       interruptOnSteer: config.interruptOnSteer,
+      steerFoldHint: config.steerFoldHint,
+      steerFoldMode: config.steerFoldMode ?? 'bot-like',
+      steerResumeAnchor: config.steerResumeAnchor !== false,
+      rpwuEnabled: config.rpwuEnabled !== false,
+      deliveryGate: config.deliveryGate !== false,
+      deliveryGateMaxRetries: typeof config.deliveryGateMaxRetries === 'number'
+        ? Math.max(0, Math.floor(config.deliveryGateMaxRetries))
+        : 2,
     }
     validateConfiguredAgents(this.config.agents)
     // Register only after every config validation above has passed, so a
