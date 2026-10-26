@@ -18,6 +18,8 @@
         steerFoldMode: bot-like
         steerResumeAnchor: true
         rpwuEnabled: true
+        # fold (default): OTHER folds into MAIN (0.1.7 short-protocol). fork: sibling unit.
+        rpwuOtherMode: fold
         deliveryGate: true
         deliveryGateMaxRetries: 2
         agents: []

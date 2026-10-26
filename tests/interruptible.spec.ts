@@ -11,7 +11,12 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import AgentLoop, { STEER_FOLD_HINT_MARKER, UNIT_FOLD_MARKER, DELIVERY_GATE_MARKER } from '../src/index.ts'
+import AgentLoop, {
+  STEER_FOLD_HINT_MARKER,
+  UNIT_FOLD_MARKER,
+  UNIT_FORK_MARKER,
+  DELIVERY_GATE_MARKER,
+} from '../src/index.ts'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter, config: {
@@ -20,6 +25,7 @@ async function harness(adapter: MockAdapter, config: {
   steerFoldMode?: 'bot-like' | 'minimal'
   steerResumeAnchor?: boolean
   rpwuEnabled?: boolean
+  rpwuOtherMode?: 'fold' | 'fork'
   deliveryGate?: boolean
   deliveryGateMaxRetries?: number
 } = {}) {
@@ -37,6 +43,7 @@ async function harness(adapter: MockAdapter, config: {
     steerFoldMode: config.steerFoldMode ?? 'bot-like',
     steerResumeAnchor: config.steerResumeAnchor ?? true,
     rpwuEnabled: config.rpwuEnabled ?? true,
+    rpwuOtherMode: config.rpwuOtherMode ?? 'fold',
     deliveryGate: config.deliveryGate ?? true,
     deliveryGateMaxRetries: config.deliveryGateMaxRetries ?? 2,
   })
@@ -578,6 +585,79 @@ describe('GrokBot interruptible loop', () => {
     const active = loopAgent.workUnits.active()
     expect(active?.delivery.chatPosted).toBe(true)
     expect(active?.status).toBe('completed')
+  })
+
+  it('RPWU P1-a: rpwuOtherMode=fork creates sibling unit; MAIN stays queryable', async () => {
+    const adapter = new MockAdapter([
+      'hang',
+      textResponse('packing then continue prior'),
+    ])
+    const ctx = await harness(adapter, { rpwuEnabled: true, rpwuOtherMode: 'fork' })
+    const agent = await ctx.agentLoop.create(SessionId('rpwu-fork'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    const running = waitUntilRunning(ctx, agent)
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'write long todo CLI' }],
+      source: { kind: 'user' },
+    }))
+    await running
+    await new Promise(r => setTimeout(r, 20))
+
+    agent.steer(createUserMessage({
+      content: [{ type: 'text', text: 'packing list please' }],
+      source: { kind: 'user' },
+    }))
+
+    const loopAgent = agent as typeof agent & {
+      workUnits: {
+        active: () => ({ id: string; goalSummary: string; status: string; foldedOtherSummaries: string[] } | null)
+        list: () => Array<{ id: string; parentId: string | null; goalSummary: string; status: string }>
+        query: (id: string) => { id: string; status: string; lane: string; parentId: string | null; checkpointCount: number } | undefined
+        siblingsOf: (parentId: string) => Array<{ id: string }>
+      }
+      lastSteerPreempt: {
+        unitId: string | null
+        unitFoldPresent: boolean
+        otherMode: 'fold' | 'fork' | null
+        siblingUnitId: string | null
+      } | null
+    }
+
+    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('fork')
+    expect(loopAgent.lastSteerPreempt?.siblingUnitId).toBeTruthy()
+    expect(loopAgent.lastSteerPreempt?.unitId).toBeTruthy()
+    expect(loopAgent.lastSteerPreempt?.unitId).not.toBe(loopAgent.lastSteerPreempt?.siblingUnitId)
+
+    const units = loopAgent.workUnits.list()
+    expect(units).toHaveLength(2)
+    const mainId = loopAgent.lastSteerPreempt!.unitId!
+    const siblingId = loopAgent.lastSteerPreempt!.siblingUnitId!
+    const mainQ = loopAgent.workUnits.query(mainId)!
+    const sibQ = loopAgent.workUnits.query(siblingId)!
+    expect(mainQ.parentId).toBeNull()
+    expect(mainQ.status).toBe('paused')
+    expect(sibQ.parentId).toBe(mainId)
+    expect(sibQ.lane).toBe('user')
+    expect(sibQ.checkpointCount).toBeGreaterThanOrEqual(1)
+    expect(loopAgent.workUnits.siblingsOf(mainId).map(u => u.id)).toContain(siblingId)
+    // Fold mode would push OTHER into MAIN summaries; fork must not.
+    expect(loopAgent.workUnits.active()?.foldedOtherSummaries ?? []).toHaveLength(0)
+
+    const stepTexts = agent.inbox.nextStep.flatMap(m =>
+      m.content.flatMap(b => b.type === 'text' ? [b.text] : []),
+    )
+    expect(stepTexts[1]).toContain(UNIT_FORK_MARKER)
+    expect(stepTexts[1]).toContain(siblingId)
+    expect(stepTexts[1]).toContain(mainId)
+    expect(stepTexts[1]).not.toContain(UNIT_FOLD_MARKER)
+
+    await agent.whenIdle()
+    const lastReq = JSON.stringify(adapter.requests.at(-1)?.messages ?? [])
+    expect(lastReq).toContain(UNIT_FORK_MARKER)
+    expect(lastReq).toContain(siblingId)
   })
 
 })

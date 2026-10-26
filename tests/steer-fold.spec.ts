@@ -128,6 +128,8 @@ describe('steer-fold hint', () => {
       resumeAnchorPresent: true,
       unitId: null,
       unitFoldPresent: false,
+      otherMode: null,
+      siblingUnitId: null,
     })
     const withUnit = buildSteerPreemptMeta({
       foldInjected: true,
@@ -135,9 +137,13 @@ describe('steer-fold hint', () => {
       resumeAnchorPresent: true,
       unitId: 'wu-1',
       unitFoldPresent: true,
+      otherMode: 'fork',
+      siblingUnitId: 'wu-2',
     })
     expect(withUnit.unitId).toBe('wu-1')
     expect(withUnit.unitFoldPresent).toBe(true)
+    expect(withUnit.otherMode).toBe('fork')
+    expect(withUnit.siblingUnitId).toBe('wu-2')
     const bare = buildSteerPreemptMeta({ foldInjected: false, mode: 'bot-like' })
     expect(bare.foldInjected).toBe(false)
     expect(bare.mode).toBeNull()
@@ -146,6 +152,8 @@ describe('steer-fold hint', () => {
     expect(bare.resumeAnchorPresent).toBe(false)
     expect(bare.unitId).toBeNull()
     expect(bare.unitFoldPresent).toBe(false)
+    expect(bare.otherMode).toBeNull()
+    expect(bare.siblingUnitId).toBeNull()
   })
 
   it('does not classify ordinary human messages as fold hints', () => {

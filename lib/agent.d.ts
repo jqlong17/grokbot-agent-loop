@@ -76,6 +76,11 @@ export declare class ReactLoopAgent implements Agent {
     private steerResumeAnchorEnabled;
     /** RPWU P0 master switch (default on). When false, behavior ≈0.1.5. */
     private rpwuEnabled;
+    /**
+     * RPWU P1-a: how OTHER joins the registry on preempt.
+     * Default `fold` preserves 0.1.7 short-protocol behavior.
+     */
+    private rpwuOtherMode;
     /** DeliveryGate (default on when RPWU is on). */
     private deliveryGateEnabled;
     /** Max DeliveryGate continuation injections per unit (default 2). */

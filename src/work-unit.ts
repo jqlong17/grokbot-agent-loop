@@ -1,8 +1,9 @@
 /**
- * RPWU P0 — Recoverable Parallel Work Units (session-local, in-memory).
+ * RPWU P0/P1 — Recoverable Parallel Work Units (session-local, in-memory).
  *
- * WorkUnit registry + step checkpoints + delivery gate helpers. Pure plugin
- * layer on top of 0.1.x cancel-then-claim; not Temporal, not multi-background.
+ * WorkUnit registry + step checkpoints + delivery gate + fold|fork OTHER
+ * admission + peer/agent-lane handoff packets. Pure plugin layer on top of
+ * 0.1.x cancel-then-claim; not Temporal, not host-level multi-model parallel.
  *
  * Community homage; not affiliated with xAI.
  *
@@ -16,11 +17,21 @@ declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'delivery-gate': { kind: 'delivery-gate' } & ContextFormed
     'unit-fold-hint': { kind: 'unit-fold-hint' } & ContextFormed
+    'peer-handoff': { kind: 'peer-handoff' } & ContextFormed
   }
 }
 
 /** Visible marker for unit-aware fold notices (tests / trajectory). */
 export const UNIT_FOLD_MARKER = '[grokbot-unit-fold]'
+
+/** Visible marker when OTHER is forked as a sibling WorkUnit (P1-a). */
+export const UNIT_FORK_MARKER = '[grokbot-unit-fork]'
+
+/** Visible marker when a completed sibling/peer result folds back into MAIN. */
+export const UNIT_FOLD_BACK_MARKER = '[grokbot-unit-fold-back]'
+
+/** Visible marker for peer/agent-lane structured handoff notices (P1-b). */
+export const PEER_HANDOFF_MARKER = '[grokbot-peer-handoff]'
 
 /** Visible marker for DeliveryGate continuation notices. */
 export const DELIVERY_GATE_MARKER = '[grokbot-delivery-gate]'
@@ -34,8 +45,53 @@ export const DEFAULT_SUBSTANTIVE_MIN_CHARS = 400
 /** Default goalSummary truncation. */
 export const DEFAULT_GOAL_SUMMARY_MAX = 240
 
+/** Default peer handoff delivery shape (living-handoff inspired). */
+export const DEFAULT_PEER_DELIVERY_SHAPE = ['theme', 'keyPoints', 'todos'] as const
+
 export type WorkUnitStatus = 'pending' | 'running' | 'paused' | 'completed' | 'cancelled'
-export type WorkUnitLane = 'user' | 'agent'
+
+/**
+ * Work-unit lane.
+ * - `user`: user-facing MAIN / OTHER claimed on user lane
+ * - `agent`: tool-continue / peer return path (P1-b)
+ * - `background`: reserved background unit (state machine; host owns real routines)
+ */
+export type WorkUnitLane = 'user' | 'agent' | 'background'
+
+/**
+ * How a preempting OTHER workstream joins the registry (P1-a).
+ * - `fold` (default): 0.1.7 short-protocol behavior — fold into MAIN
+ * - `fork`: create an independently queryable sibling WorkUnit
+ */
+export type RpwuOtherMode = 'fold' | 'fork'
+
+/** Where a deliverySpec requires the result to land. */
+export type DeliverySink = 'chat' | 'notice' | 'workspace'
+
+/**
+ * Optional per-unit delivery contract (P1-c).
+ * When present, DeliveryGate verifies shape fields + sink — not only chatPosted.
+ */
+export interface DeliverySpec {
+  /** Required payload keys (e.g. theme / keyPoints / todos). */
+  shape: readonly string[]
+  /** Required sink; default treated as `chat` when omitted by callers. */
+  sink: DeliverySink
+  /** Optional human-readable contract note. */
+  description?: string
+}
+
+/**
+ * Structured peer/background return packet (P1-b).
+ * Inspired by living handoff: theme / key points / TODOs — not free text alone.
+ */
+export interface PeerHandoffPacket {
+  theme: string
+  keyPoints: readonly string[]
+  todos: readonly string[]
+  /** Optional prose for chat fold-back. */
+  summary?: string
+}
 
 export interface WorkUnitDelivery {
   chatPosted: boolean
@@ -47,7 +103,7 @@ export interface ToolResultRef {
   summary?: string
 }
 
-export type CheckpointReason = 'step-end' | 'preempt' | 'gate' | 'manual'
+export type CheckpointReason = 'step-end' | 'preempt' | 'gate' | 'manual' | 'fold-back' | 'peer-handoff'
 
 export interface StepCheckpoint {
   unitId: string
@@ -67,22 +123,46 @@ export interface WorkUnit {
   goalSummary: string
   status: WorkUnitStatus
   lane: WorkUnitLane
+  /** Parent MAIN (or control-plane) unit when this is a forked sibling / peer return. */
+  parentId: string | null
   createdAtStep: number
   createdAtTurn: number
   checkpoints: StepCheckpoint[]
   delivery: WorkUnitDelivery
-  /** Short summaries of OTHER interrupts folded into this unit (P0: no fork). */
+  /** Short summaries of OTHER interrupts folded into this unit (fold mode). */
   foldedOtherSummaries: string[]
   /** How many DeliveryGate continuation steps have already been injected. */
   gateRetries: number
+  /** Optional delivery contract (P1-c). */
+  deliverySpec: DeliverySpec | null
+  /** Structured payload satisfying deliverySpec / peer handoff. */
+  deliveryPayload: Record<string, unknown> | null
+  /** Last peer packet folded into this (MAIN) unit. */
+  lastPeerPacket: PeerHandoffPacket | null
+}
+
+/** Queryable unit view (status / checkpoint / lane) for sibling inspection. */
+export interface WorkUnitQuery {
+  id: string
+  status: WorkUnitStatus
+  lane: WorkUnitLane
+  parentId: string | null
+  goalSummary: string
+  checkpointCount: number
+  lastCheckpoint: StepCheckpoint | null
+  delivery: WorkUnitDelivery
+  deliverySpec: DeliverySpec | null
+  deliverySpecMet: boolean
 }
 
 export interface CreateWorkUnitInput {
   goalSummary: string
   lane?: WorkUnitLane
+  parentId?: string | null
   createdAtStep?: number
   createdAtTurn?: number
   id?: string
+  deliverySpec?: DeliverySpec | null
 }
 
 export interface WorkUnitSnapshot {
@@ -183,10 +263,61 @@ export function assistantPrefixStats(
   return { cursor: text.length, hash: simpleTextHash(text), text }
 }
 
+/** Normalize a peer handoff packet (trim + copy arrays). */
+export function normalizePeerHandoffPacket(packet: PeerHandoffPacket): PeerHandoffPacket {
+  return {
+    theme: String(packet.theme ?? '').trim(),
+    keyPoints: [...(packet.keyPoints ?? [])].map(s => String(s).trim()).filter(Boolean),
+    todos: [...(packet.todos ?? [])].map(s => String(s).trim()).filter(Boolean),
+    ...(packet.summary !== undefined ? { summary: String(packet.summary).trim() } : {}),
+  }
+}
+
+/** Default deliverySpec for peer/agent-lane returns. */
+export function defaultPeerDeliverySpec(sink: DeliverySink = 'chat'): DeliverySpec {
+  return {
+    shape: [...DEFAULT_PEER_DELIVERY_SHAPE],
+    sink,
+    description: 'Peer/agent-lane handoff: theme + keyPoints + todos',
+  }
+}
+
+/**
+ * Verify deliverySpec against unit.deliveryPayload.
+ * No spec → satisfied (gate falls back to chatPosted / workspaceOnly).
+ */
+export function verifyDeliverySpec(unit: WorkUnit): { ok: boolean; missing: string[] } {
+  const spec = unit.deliverySpec
+  if (!spec || spec.shape.length === 0) return { ok: true, missing: [] }
+  const payload = unit.deliveryPayload ?? {}
+  const missing: string[] = []
+  for (const field of spec.shape) {
+    const v = payload[field]
+    if (v === undefined || v === null) {
+      missing.push(field)
+      continue
+    }
+    if (typeof v === 'string' && v.trim() === '') {
+      missing.push(field)
+      continue
+    }
+    if (Array.isArray(v) && v.length === 0) {
+      missing.push(field)
+      continue
+    }
+  }
+  return { ok: missing.length === 0, missing }
+}
+
+/** True when deliverySpec (if any) is fully satisfied. */
+export function isDeliverySpecMet(unit: WorkUnit): boolean {
+  return verifyDeliverySpec(unit).ok
+}
+
 /**
  * Whether DeliveryGate should inject a continuation.
- * Fires when retries remain and either chatPosted is false, or the unit is still
- * marked workspaceOnly (sticky chat from OTHER + later tool dump of MAIN).
+ * Fires when retries remain and either chatPosted is false, workspaceOnly sticky,
+ * or an attached deliverySpec is unsatisfied (P1-c).
  */
 export function shouldRunDeliveryGate(
   unit: WorkUnit,
@@ -196,6 +327,20 @@ export function shouldRunDeliveryGate(
   const max = options.maxRetries ?? DEFAULT_DELIVERY_GATE_MAX
   if (unit.gateRetries >= max) return false
   if (unit.status === 'completed' || unit.status === 'cancelled') return false
+
+  const spec = unit.deliverySpec
+  const specOk = isDeliverySpecMet(unit)
+
+  if (spec) {
+    // Contract present: sink + shape drive the gate.
+    if (!specOk) return true
+    if (spec.sink === 'chat' && !unit.delivery.chatPosted) return true
+    if (spec.sink === 'chat' && unit.delivery.workspaceOnly) return true
+    if (spec.sink === 'workspace') return false
+    if (spec.sink === 'notice') return false
+    return false
+  }
+
   if (!unit.delivery.chatPosted) return true
   // Sticky chatPosted from an earlier OTHER answer must not skip MAIN tool dumps.
   if (unit.delivery.workspaceOnly) return true
@@ -209,14 +354,29 @@ export function canMarkCompleted(
 ): boolean {
   if (unit.status === 'cancelled') return false
   if (!options.deliveryGate) return true
-  if (!unit.delivery.chatPosted) return false
+
   const max = options.maxRetries ?? DEFAULT_DELIVERY_GATE_MAX
+  const spec = unit.deliverySpec
+
+  if (spec) {
+    if (!isDeliverySpecMet(unit)) {
+      // Exhausted retries → allow complete (same honesty as workspaceOnly budget).
+      return unit.gateRetries >= max
+    }
+    if (spec.sink === 'chat') {
+      if (!unit.delivery.chatPosted) return false
+      if (unit.delivery.workspaceOnly && unit.gateRetries < max) return false
+    }
+    return true
+  }
+
+  if (!unit.delivery.chatPosted) return false
   // After gate budget is exhausted, allow complete even if still workspace-leaning.
   if (unit.delivery.workspaceOnly && unit.gateRetries < max) return false
   return true
 }
 
-/** Build fold-notice suffix referencing the bound MAIN unit. */
+/** Build fold-notice suffix referencing the bound MAIN unit (fold mode). */
 export function buildUnitFoldBlock(unit: WorkUnit): string {
   return (
     `${UNIT_FOLD_MARKER} Bound MAIN work unit ${unit.id} ` +
@@ -226,14 +386,82 @@ export function buildUnitFoldBlock(unit: WorkUnit): string {
   )
 }
 
+/** Build fork-notice suffix for a MAIN + sibling pair (fork mode). */
+export function buildUnitForkBlock(main: WorkUnit, sibling: WorkUnit): string {
+  return (
+    `${UNIT_FORK_MARKER} Forked sibling work unit ${sibling.id} ` +
+    `(lane: ${sibling.lane}, goal: ${sibling.goalSummary}) from MAIN ${main.id} ` +
+    `(goal: ${main.goalSummary}). Track sibling status/checkpoints independently; ` +
+    `when the sibling completes, fold its result back into MAIN conversation ` +
+    `(no fake Temporal — registry fold-back only).`
+  )
+}
+
+/** Build fold-back notice when a sibling/peer result rejoins MAIN. */
+export function buildUnitFoldBackNotice(
+  main: WorkUnit,
+  sibling: WorkUnit,
+  packet?: PeerHandoffPacket | null,
+): UserMessage {
+  const packetBlock = packet
+    ? ` Packet: theme="${packet.theme}"; ` +
+      `keyPoints=${packet.keyPoints.length}; todos=${packet.todos.length}` +
+      (packet.summary ? `; summary=${summarizeGoal(packet.summary, 80)}` : '') +
+      '.'
+    : ''
+  const text =
+    `${UNIT_FOLD_BACK_MARKER} Sibling/peer unit ${sibling.id} completed and folded ` +
+    `into MAIN ${main.id} (goal: ${main.goalSummary}).${packetBlock} ` +
+    `Resume MAIN from its last completed step; surface the folded result in visible chat.`
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: {
+      kind: 'unit-fold-hint',
+      form: 'notice',
+      summary: `Fold-back: ${sibling.id} → MAIN ${main.id}`,
+    },
+  })
+}
+
+/** Build a peer-handoff notice carrying structured theme/keyPoints/todos. */
+export function buildPeerHandoffNotice(
+  main: WorkUnit,
+  peer: WorkUnit,
+  packet: PeerHandoffPacket,
+): UserMessage {
+  const points = packet.keyPoints.map((p, i) => `${i + 1}. ${p}`).join('; ')
+  const todos = packet.todos.map((t, i) => `${i + 1}. ${t}`).join('; ')
+  const text =
+    `${PEER_HANDOFF_MARKER} Peer/agent-lane unit ${peer.id} returned into MAIN ${main.id}. ` +
+    `theme: ${packet.theme}. ` +
+    `keyPoints: [${points}]. ` +
+    `todos: [${todos}].` +
+    (packet.summary ? ` summary: ${packet.summary}` : '')
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: {
+      kind: 'peer-handoff',
+      form: 'notice',
+      summary: `Peer handoff → MAIN ${main.id}: ${packet.theme}`,
+    },
+  })
+}
+
 /** DeliveryGate continuation notice (producer-owned). */
 export function buildDeliveryGateNotice(unit: WorkUnit): UserMessage {
+  const specCheck = verifyDeliverySpec(unit)
+  const specPart = unit.deliverySpec
+    ? ` deliverySpec(sink=${unit.deliverySpec.sink}, shape=[${unit.deliverySpec.shape.join(',')}])` +
+      (specCheck.ok ? ' met;' : ` missing=[${specCheck.missing.join(',')}];`)
+    : ''
   const text =
     `${DELIVERY_GATE_MARKER} DeliveryGate for unit ${unit.id} ` +
-    `(goal: ${unit.goalSummary}): prior step looked like tool/progress-only ` +
+    `(goal: ${unit.goalSummary}): prior step looked incomplete` +
+    `${specPart} ` +
     `(chatPosted=${unit.delivery.chatPosted}, workspaceOnly=${unit.delivery.workspaceOnly}). ` +
     `Paste the MAIN code / CLI progress (fenced code block) and any still-missing ` +
-    `OTHER answer into the visible assistant reply now — do not only write to disk.`
+    `OTHER answer / required deliverySpec fields into the visible assistant reply now — ` +
+    `do not only write to disk.`
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: {
@@ -248,7 +476,22 @@ export function isDeliveryGateNotice(message: UserMessage): boolean {
   return message.source.kind === 'delivery-gate'
 }
 
-/** Session-local WorkUnit table (P0: in-memory, Agent lifetime). */
+export function isPeerHandoffNotice(message: UserMessage): boolean {
+  return message.source.kind === 'peer-handoff'
+}
+
+/** Payload object derived from a peer handoff packet. */
+export function peerPacketToPayload(packet: PeerHandoffPacket): Record<string, unknown> {
+  const normalized = normalizePeerHandoffPacket(packet)
+  return {
+    theme: normalized.theme,
+    keyPoints: [...normalized.keyPoints],
+    todos: [...normalized.todos],
+    ...(normalized.summary !== undefined ? { summary: normalized.summary } : {}),
+  }
+}
+
+/** Session-local WorkUnit table (P0/P1: in-memory, Agent lifetime). */
 export class WorkUnitRegistry {
   private readonly units = new Map<string, WorkUnit>()
   private activeId: string | null = null
@@ -261,17 +504,24 @@ export class WorkUnitRegistry {
     if (this.units.has(id)) {
       throw new Error(`WorkUnitRegistry: duplicate unit id "${id}"`)
     }
+    if (input.parentId != null && !this.units.has(input.parentId)) {
+      throw new Error(`WorkUnitRegistry: unknown parent unit "${input.parentId}"`)
+    }
     const unit: WorkUnit = {
       id,
       goalSummary: summarizeGoal(input.goalSummary),
       status: 'pending',
       lane: input.lane ?? 'user',
+      parentId: input.parentId ?? null,
       createdAtStep: input.createdAtStep ?? 0,
       createdAtTurn: input.createdAtTurn ?? 0,
       checkpoints: [],
       delivery: { chatPosted: false, workspaceOnly: false },
       foldedOtherSummaries: [],
       gateRetries: 0,
+      deliverySpec: input.deliverySpec ?? null,
+      deliveryPayload: null,
+      lastPeerPacket: null,
     }
     this.units.set(id, unit)
     return unit
@@ -283,6 +533,36 @@ export class WorkUnitRegistry {
 
   list(): WorkUnit[] {
     return [...this.units.values()]
+  }
+
+  /** Independently queryable unit view (status / checkpoint / lane). */
+  query(id: string): WorkUnitQuery | undefined {
+    const unit = this.units.get(id)
+    if (!unit) return undefined
+    return {
+      id: unit.id,
+      status: unit.status,
+      lane: unit.lane,
+      parentId: unit.parentId,
+      goalSummary: unit.goalSummary,
+      checkpointCount: unit.checkpoints.length,
+      lastCheckpoint: unit.checkpoints.at(-1) ?? null,
+      delivery: { ...unit.delivery },
+      deliverySpec: unit.deliverySpec
+        ? { ...unit.deliverySpec, shape: [...unit.deliverySpec.shape] }
+        : null,
+      deliverySpecMet: isDeliverySpecMet(unit),
+    }
+  }
+
+  /** List siblings (children) of a parent unit. */
+  siblingsOf(parentId: string): WorkUnit[] {
+    return this.list().filter(u => u.parentId === parentId)
+  }
+
+  /** List units on a given lane. */
+  byLane(lane: WorkUnitLane): WorkUnit[] {
+    return this.list().filter(u => u.lane === lane)
   }
 
   bindActive(id: string | null): void {
@@ -316,6 +596,20 @@ export class WorkUnitRegistry {
     unit.delivery = { ...unit.delivery, ...flags }
   }
 
+  setDeliverySpec(id: string, spec: DeliverySpec | null): void {
+    const unit = this.units.get(id)
+    if (!unit) throw new Error(`WorkUnitRegistry: unknown unit "${id}"`)
+    unit.deliverySpec = spec
+      ? { shape: [...spec.shape], sink: spec.sink, ...(spec.description ? { description: spec.description } : {}) }
+      : null
+  }
+
+  setDeliveryPayload(id: string, payload: Record<string, unknown> | null): void {
+    const unit = this.units.get(id)
+    if (!unit) throw new Error(`WorkUnitRegistry: unknown unit "${id}"`)
+    unit.deliveryPayload = payload === null ? null : { ...payload }
+  }
+
   appendCheckpoint(cp: Omit<StepCheckpoint, 'at'> & { at?: number }): StepCheckpoint {
     const unit = this.units.get(cp.unitId)
     if (!unit) throw new Error(`WorkUnitRegistry: unknown unit "${cp.unitId}"`)
@@ -341,8 +635,29 @@ export class WorkUnitRegistry {
   }): WorkUnit {
     const existing = this.active()
     if (existing && (existing.status === 'running' || existing.status === 'paused' || existing.status === 'pending')) {
-      if (options.status) existing.status = options.status
-      return existing
+      // Prefer an open user-lane MAIN (parentId null). If active is a sibling, climb.
+      if (existing.parentId === null && existing.lane === 'user') {
+        if (options.status) existing.status = options.status
+        return existing
+      }
+      const parent = existing.parentId ? this.units.get(existing.parentId) : null
+      if (parent && (parent.status === 'running' || parent.status === 'paused' || parent.status === 'pending')) {
+        if (options.status) parent.status = options.status
+        this.bindActive(parent.id)
+        return parent
+      }
+    }
+    // Also reuse any open root MAIN even if not currently active.
+    for (const u of this.units.values()) {
+      if (
+        u.parentId === null
+        && u.lane === 'user'
+        && (u.status === 'running' || u.status === 'paused' || u.status === 'pending')
+      ) {
+        if (options.status) u.status = options.status
+        this.bindActive(u.id)
+        return u
+      }
     }
     const unit = this.create({
       goalSummary: options.goalSummary,
@@ -353,6 +668,161 @@ export class WorkUnitRegistry {
     unit.status = options.status ?? 'running'
     this.bindActive(unit.id)
     return unit
+  }
+
+  /**
+   * P1-a: fork a sibling WorkUnit under MAIN.
+   * Sibling is independently queryable; MAIN stays the control-plane parent.
+   * By default binds the sibling active so subsequent checkpoints land there
+   * until {@link foldSiblingIntoMain} rebinds MAIN.
+   */
+  forkSibling(options: {
+    parentId: string
+    goalSummary: string
+    lane?: WorkUnitLane
+    createdAtTurn?: number
+    createdAtStep?: number
+    status?: WorkUnitStatus
+    deliverySpec?: DeliverySpec | null
+    bindActive?: boolean
+  }): WorkUnit {
+    const parent = this.units.get(options.parentId)
+    if (!parent) throw new Error(`WorkUnitRegistry: unknown parent unit "${options.parentId}"`)
+    if (parent.status === 'running') parent.status = 'paused'
+    const sibling = this.create({
+      goalSummary: options.goalSummary,
+      lane: options.lane ?? 'user',
+      parentId: parent.id,
+      createdAtTurn: options.createdAtTurn ?? parent.createdAtTurn,
+      createdAtStep: options.createdAtStep ?? parent.createdAtStep,
+      deliverySpec: options.deliverySpec ?? null,
+    })
+    sibling.status = options.status ?? 'running'
+    if (options.bindActive !== false) this.bindActive(sibling.id)
+    return sibling
+  }
+
+  /**
+   * P1-a: complete a forked sibling and fold its result back into MAIN.
+   * Does not invent Temporal — registry status + optional packet + rebind only.
+   */
+  foldSiblingIntoMain(options: {
+    siblingId: string
+    packet?: PeerHandoffPacket | null
+    deliveryGate?: boolean
+    maxRetries?: number
+  }): { main: WorkUnit; sibling: WorkUnit; notice: UserMessage } {
+    const sibling = this.units.get(options.siblingId)
+    if (!sibling) throw new Error(`WorkUnitRegistry: unknown sibling "${options.siblingId}"`)
+    if (!sibling.parentId) {
+      throw new Error(`WorkUnitRegistry: unit "${options.siblingId}" has no parent to fold into`)
+    }
+    const main = this.units.get(sibling.parentId)
+    if (!main) throw new Error(`WorkUnitRegistry: missing parent "${sibling.parentId}"`)
+
+    const packet = options.packet ? normalizePeerHandoffPacket(options.packet) : null
+    if (packet) {
+      this.setDeliveryPayload(sibling.id, peerPacketToPayload(packet))
+      if (!sibling.deliverySpec) {
+        this.setDeliverySpec(sibling.id, defaultPeerDeliverySpec('chat'))
+      }
+      // Folding into chat: mark sibling chat delivery satisfied for gate.
+      this.updateDelivery(sibling.id, { chatPosted: true, workspaceOnly: false })
+      main.lastPeerPacket = packet
+      main.foldedOtherSummaries.push(
+        summarizeGoal(packet.summary ?? `peer:${packet.theme}`, 120),
+      )
+    } else {
+      main.foldedOtherSummaries.push(summarizeGoal(`fold-back:${sibling.goalSummary}`, 120))
+    }
+
+    const gateOpts = {
+      deliveryGate: options.deliveryGate ?? false,
+      maxRetries: options.maxRetries,
+    }
+    if (!this.tryComplete(sibling.id, gateOpts)) {
+      // Force-complete sibling after fold-back bookkeeping when gate still blocks
+      // (caller explicitly requested fold-back).
+      sibling.status = 'completed'
+    }
+
+    if (main.status === 'completed' || main.status === 'cancelled') {
+      // Leave MAIN status as-is; still rebind for queryability.
+    } else if (main.status === 'paused' || main.status === 'pending') {
+      main.status = 'running'
+    }
+    this.bindActive(main.id)
+
+    const notice = packet
+      ? buildPeerHandoffNotice(main, sibling, packet)
+      : buildUnitFoldBackNotice(main, sibling, null)
+
+    this.appendCheckpoint({
+      unitId: main.id,
+      stepIndex: main.checkpoints.at(-1)?.stepIndex ?? main.createdAtStep,
+      turn: main.checkpoints.at(-1)?.turn ?? main.createdAtTurn,
+      assistantPrefixCursor: main.checkpoints.at(-1)?.assistantPrefixCursor ?? 0,
+      assistantPrefixHash: main.checkpoints.at(-1)?.assistantPrefixHash ?? '00000000',
+      toolResultRefs: [],
+      status: main.status,
+      delivery: { ...main.delivery },
+      reason: packet ? 'peer-handoff' : 'fold-back',
+    })
+
+    return { main, sibling, notice }
+  }
+
+  /**
+   * P1-b: peer/background finished → structured packet → agent-lane unit → fold into MAIN.
+   * Simulates the living-handoff return path inside the registry (tests / host hooks).
+   */
+  acceptPeerHandoff(options: {
+    parentId: string
+    packet: PeerHandoffPacket
+    goalSummary?: string
+    lane?: WorkUnitLane
+    createdAtTurn?: number
+    createdAtStep?: number
+    sink?: DeliverySink
+  }): { peer: WorkUnit; main: WorkUnit; notice: UserMessage } {
+    const parent = this.units.get(options.parentId)
+    if (!parent) throw new Error(`WorkUnitRegistry: unknown parent "${options.parentId}"`)
+    const packet = normalizePeerHandoffPacket(options.packet)
+    const sink = options.sink ?? 'chat'
+    const peer = this.create({
+      goalSummary: options.goalSummary ?? `peer:${packet.theme}`,
+      lane: options.lane ?? 'agent',
+      parentId: parent.id,
+      createdAtTurn: options.createdAtTurn ?? parent.createdAtTurn,
+      createdAtStep: options.createdAtStep ?? parent.createdAtStep,
+      deliverySpec: defaultPeerDeliverySpec(sink),
+    })
+    peer.status = 'running'
+    this.setDeliveryPayload(peer.id, peerPacketToPayload(packet))
+    this.updateDelivery(peer.id, {
+      chatPosted: sink === 'chat' || sink === 'notice',
+      workspaceOnly: sink === 'workspace',
+    })
+    this.appendCheckpoint({
+      unitId: peer.id,
+      stepIndex: peer.createdAtStep,
+      turn: peer.createdAtTurn,
+      assistantPrefixCursor: 0,
+      assistantPrefixHash: simpleTextHash(packet.theme),
+      toolResultRefs: [],
+      status: 'running',
+      delivery: { ...peer.delivery },
+      reason: 'peer-handoff',
+    })
+
+    const folded = this.foldSiblingIntoMain({
+      siblingId: peer.id,
+      packet,
+      deliveryGate: true,
+    })
+    // Prefer the peer-handoff-shaped notice over generic fold-back.
+    const notice = buildPeerHandoffNotice(folded.main, folded.sibling, packet)
+    return { peer: folded.sibling, main: folded.main, notice }
   }
 
   tryComplete(id: string, options: { deliveryGate: boolean; maxRetries?: number }): boolean {
@@ -378,6 +848,20 @@ export class WorkUnitRegistry {
         checkpoints: [...u.checkpoints],
         foldedOtherSummaries: [...u.foldedOtherSummaries],
         delivery: { ...u.delivery },
+        deliverySpec: u.deliverySpec
+          ? { ...u.deliverySpec, shape: [...u.deliverySpec.shape] }
+          : null,
+        deliveryPayload: u.deliveryPayload ? { ...u.deliveryPayload } : null,
+        lastPeerPacket: u.lastPeerPacket
+          ? {
+              theme: u.lastPeerPacket.theme,
+              keyPoints: [...u.lastPeerPacket.keyPoints],
+              todos: [...u.lastPeerPacket.todos],
+              ...(u.lastPeerPacket.summary !== undefined
+                ? { summary: u.lastPeerPacket.summary }
+                : {}),
+            }
+          : null,
       })),
     }
   }
@@ -390,14 +874,18 @@ export interface DeliveryGateMeta {
   readonly gateRetries: number
   readonly injected: boolean
   readonly marker: typeof DELIVERY_GATE_MARKER
+  /** Missing deliverySpec fields when contract was the gate reason. */
+  readonly missingSpecFields: readonly string[]
 }
 
 export function buildDeliveryGateMeta(unit: WorkUnit, injected: boolean): DeliveryGateMeta {
+  const { missing } = verifyDeliverySpec(unit)
   return {
     kind: 'delivery-gate',
     unitId: unit.id,
     gateRetries: unit.gateRetries,
     injected,
     marker: DELIVERY_GATE_MARKER,
+    missingSpecFields: missing,
   }
 }

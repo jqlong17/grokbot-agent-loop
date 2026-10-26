@@ -46,6 +46,7 @@ The package ships `cordis.patch.yml` that replaces Cordis id `agent-loop`:
     steerFoldMode: bot-like
     steerResumeAnchor: true
     rpwuEnabled: true
+    rpwuOtherMode: fold
     deliveryGate: true
     deliveryGateMaxRetries: 2
     agents: []
@@ -78,9 +79,20 @@ Config flags:
 - `steerFoldHint` (default `true`) — after preempt, inject a producer notice: fully answer the newest interrupt, then finish the prior unfinished task without omission (prompt-layer fold vs grok.com Bot; does not rewrite user interrupt text)
 - `steerFoldMode` (default `bot-like`) — `bot-like` full two-phase copy; `minimal` shorter notice, same ordering contract
 - `steerResumeAnchor` (default `true`) — embed a truncated unfinished MAIN user quote in the fold notice so the model resumes the exact prior deliverable in visible chat; set `false` for 0.1.4-style notices
-- `rpwuEnabled` (default `true`) — RPWU P0 WorkUnit registry + step checkpoints + fold-into-unit; set `false` for ≈0.1.5 behavior
-- `deliveryGate` (default `true`, requires RPWU) — block unit completion on non-substantive / workspace-only delivery; inject chat continuations
+- `rpwuEnabled` (default `true`) — RPWU WorkUnit registry + step checkpoints + fold-into-unit; set `false` for ≈0.1.5 behavior
+- `rpwuOtherMode` (default `fold`) — P1-a: `fold` keeps OTHER inside MAIN (0.1.7 short-protocol); `fork` creates an independently queryable sibling WorkUnit that can fold back into MAIN when complete
+- `deliveryGate` (default `true`, requires RPWU) — block unit completion on non-substantive / workspace-only delivery; when a unit has `deliverySpec`, also verify shape + sink
 - `deliveryGateMaxRetries` (default `2`) — max DeliveryGate continuation injections per unit
+
+### 0.1.8 notes
+
+RPWU P1 slice toward Grok Bot–like work mode (community homage; **not** affiliated with xAI):
+
+- **P1-a fold|fork** — `rpwuOtherMode: fold|fork` (default `fold`). Fork creates a sibling WorkUnit (status / checkpoint / lane queryable via `workUnits.query` / `siblingsOf`); `foldSiblingIntoMain` folds the result back into user-facing MAIN without inventing Temporal.
+- **P1-b agent-lane peer return** — `acceptPeerHandoff` models background/peer finished → structured packet (`theme` / `keyPoints` / `todos`) → fold into MAIN conversation (`[grokbot-peer-handoff]`).
+- **P1-c deliverySpec** — optional `{ shape, sink }` on WorkUnit; DeliveryGate verifies the contract when present; sticky `chatPosted` + `workspaceOnly` from 0.1.7 unchanged for units without a spec.
+
+Honest limit: true multi-model parallel still belongs to the Grok/dsh host; this release enables registry-level sibling units + structured fold-back inside one Agent session.
 
 ### 0.1.7 notes
 

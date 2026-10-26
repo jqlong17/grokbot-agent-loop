@@ -37,7 +37,10 @@ export interface SteerFoldBuildOptions {
     unitId?: string | null;
     /** RPWU P0: bound MAIN goal summary embedded in fold notice. */
     unitGoalSummary?: string | null;
-    /** Optional prebuilt unit-fold block (includes marker). */
+    /**
+     * Optional prebuilt unit-fold or unit-fork block (includes marker).
+     * Prefer this over synthesizing from unitId when RPWU P1 fork is active.
+     */
     unitFoldBlock?: string | null;
 }
 /**
@@ -114,8 +117,15 @@ export interface SteerPreemptMeta {
     readonly resumeAnchorPresent: boolean;
     /** RPWU P0: bound MAIN unit id when fold-into-unit ran (0.1.6+). */
     readonly unitId: string | null;
-    /** RPWU P0: whether a unit-fold marker was embedded. */
+    /** RPWU P0: whether a unit-fold / unit-fork marker was embedded. */
     readonly unitFoldPresent: boolean;
+    /**
+     * RPWU P1-a: how OTHER joined the registry (`fold` default / `fork` sibling).
+     * Null when RPWU did not run on this preempt.
+     */
+    readonly otherMode: 'fold' | 'fork' | null;
+    /** RPWU P1-a: forked sibling unit id when otherMode is `fork`. */
+    readonly siblingUnitId: string | null;
 }
 /** Build a trajectory-friendly preempt meta record. */
 export declare function buildSteerPreemptMeta(options: {
@@ -124,5 +134,7 @@ export declare function buildSteerPreemptMeta(options: {
     resumeAnchorPresent?: boolean;
     unitId?: string | null;
     unitFoldPresent?: boolean;
+    otherMode?: 'fold' | 'fork' | null;
+    siblingUnitId?: string | null;
 }): SteerPreemptMeta;
 //# sourceMappingURL=steer-fold.d.ts.map
