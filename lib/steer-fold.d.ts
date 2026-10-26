@@ -120,12 +120,19 @@ export interface SteerPreemptMeta {
     /** RPWU P0: whether a unit-fold / unit-fork marker was embedded. */
     readonly unitFoldPresent: boolean;
     /**
-     * RPWU P1-a: how OTHER joined the registry (`fold` default / `fork` sibling).
+     * RPWU P1-a / P1.5: how OTHER joined the registry (`fold` default / `fork` sibling).
      * Null when RPWU did not run on this preempt.
      */
     readonly otherMode: 'fold' | 'fork' | null;
     /** RPWU P1-a: forked sibling unit id when otherMode is `fork`. */
     readonly siblingUnitId: string | null;
+    /**
+     * P1.5: true when fork ran without host `ctx.subagents` (registry-only degrade).
+     * False when subagent-backed parallel fork succeeded; null when not a fork path.
+     */
+    readonly forkDegraded: boolean | null;
+    /** P1.5: host child Session id when subagent-backed fork linked a child. */
+    readonly childSessionId: string | null;
 }
 /** Build a trajectory-friendly preempt meta record. */
 export declare function buildSteerPreemptMeta(options: {
@@ -136,5 +143,7 @@ export declare function buildSteerPreemptMeta(options: {
     unitFoldPresent?: boolean;
     otherMode?: 'fold' | 'fork' | null;
     siblingUnitId?: string | null;
+    forkDegraded?: boolean | null;
+    childSessionId?: string | null;
 }): SteerPreemptMeta;
 //# sourceMappingURL=steer-fold.d.ts.map

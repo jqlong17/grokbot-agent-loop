@@ -20,7 +20,10 @@
         steerFoldMode: bot-like
         steerResumeAnchor: true
         rpwuEnabled: true
+        # fold (default): OTHER into MAIN. fork|subagent: try host startActivation.
         rpwuOtherMode: fold
+        rpwuSubagentProvider: spawn
+        rpwuSubagentDelivery: caller
         deliveryGate: true
         deliveryGateMaxRetries: 2
         agents: []

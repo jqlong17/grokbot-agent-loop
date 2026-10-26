@@ -1,9 +1,10 @@
 /**
- * RPWU P0/P1 — Recoverable Parallel Work Units (session-local, in-memory).
+ * RPWU P0/P1/P1.5 — Recoverable Parallel Work Units (session-local, in-memory).
  *
  * WorkUnit registry + step checkpoints + delivery gate + fold|fork OTHER
- * admission + peer/agent-lane handoff packets. Pure plugin layer on top of
- * 0.1.x cancel-then-claim; not Temporal, not host-level multi-model parallel.
+ * admission + peer/agent-lane handoff packets. P1.5 links fork siblings to a
+ * host subagent child Session via `childSessionId` / activation ref — true
+ * multi-model parallel still belongs to `ctx.subagents`, not this registry.
  *
  * Community homage; not affiliated with xAI.
  *
@@ -26,6 +27,12 @@ export const UNIT_FOLD_MARKER = '[grokbot-unit-fold]'
 
 /** Visible marker when OTHER is forked as a sibling WorkUnit (P1-a). */
 export const UNIT_FORK_MARKER = '[grokbot-unit-fork]'
+
+/**
+ * Visible marker when fork wanted a host subagent but `ctx.subagents` was
+ * missing — falls back to 0.1.8 registry-only + single-Agent cancel-then-claim.
+ */
+export const UNIT_FORK_DEGRADED_MARKER = '[grokbot-unit-fork-degraded]'
 
 /** Visible marker when a completed sibling/peer result folds back into MAIN. */
 export const UNIT_FOLD_BACK_MARKER = '[grokbot-unit-fold-back]'
@@ -59,11 +66,18 @@ export type WorkUnitStatus = 'pending' | 'running' | 'paused' | 'completed' | 'c
 export type WorkUnitLane = 'user' | 'agent' | 'background'
 
 /**
- * How a preempting OTHER workstream joins the registry (P1-a).
+ * How a preempting OTHER workstream joins the registry (P1-a / P1.5).
  * - `fold` (default): 0.1.7 short-protocol behavior — fold into MAIN
- * - `fork`: create an independently queryable sibling WorkUnit
+ * - `fork` / `subagent`: try host `ctx.subagents.startActivation` for a real
+ *   child Session; degrade to registry-only sibling when the seam is absent
  */
-export type RpwuOtherMode = 'fold' | 'fork'
+export type RpwuOtherMode = 'fold' | 'fork' | 'subagent'
+
+/** Normalize config aliases: `subagent` → fork-path semantics. */
+export function normalizeRpwuOtherMode(mode: string | undefined): 'fold' | 'fork' {
+  if (mode === 'fork' || mode === 'subagent') return 'fork'
+  return 'fold'
+}
 
 /** Where a deliverySpec requires the result to land. */
 export type DeliverySink = 'chat' | 'notice' | 'workspace'
@@ -118,6 +132,16 @@ export interface StepCheckpoint {
   reason: CheckpointReason
 }
 
+/** P1.5: opaque handle for a live host activation (plugin does not own backends). */
+export interface WorkUnitActivationRef {
+  /** Host child Session id returned by `startActivation`. */
+  childSessionId: string
+  /** Provider name (`spawn` / `fork` / …). */
+  provider: string
+  /** Optional run id when observed via `subagent/start`. */
+  runId?: string
+}
+
 export interface WorkUnit {
   id: string
   goalSummary: string
@@ -139,6 +163,13 @@ export interface WorkUnit {
   deliveryPayload: Record<string, unknown> | null
   /** Last peer packet folded into this (MAIN) unit. */
   lastPeerPacket: PeerHandoffPacket | null
+  /**
+   * P1.5: host child Session id when this sibling is backed by
+   * `ctx.subagents.startActivation` (null for registry-only / degraded fork).
+   */
+  childSessionId: string | null
+  /** P1.5: activation metadata for fold-back correlation. */
+  activationRef: WorkUnitActivationRef | null
 }
 
 /** Queryable unit view (status / checkpoint / lane) for sibling inspection. */
@@ -153,6 +184,9 @@ export interface WorkUnitQuery {
   delivery: WorkUnitDelivery
   deliverySpec: DeliverySpec | null
   deliverySpecMet: boolean
+  /** P1.5: host child Session id when subagent-backed. */
+  childSessionId: string | null
+  activationRef: WorkUnitActivationRef | null
 }
 
 export interface CreateWorkUnitInput {
@@ -388,12 +422,28 @@ export function buildUnitFoldBlock(unit: WorkUnit): string {
 
 /** Build fork-notice suffix for a MAIN + sibling pair (fork mode). */
 export function buildUnitForkBlock(main: WorkUnit, sibling: WorkUnit): string {
+  const childPart = sibling.childSessionId
+    ? ` Host child Session ${sibling.childSessionId} runs OTHER in parallel;`
+    : ''
   return (
     `${UNIT_FORK_MARKER} Forked sibling work unit ${sibling.id} ` +
     `(lane: ${sibling.lane}, goal: ${sibling.goalSummary}) from MAIN ${main.id} ` +
-    `(goal: ${main.goalSummary}). Track sibling status/checkpoints independently; ` +
+    `(goal: ${main.goalSummary}).${childPart} Track sibling status/checkpoints independently; ` +
     `when the sibling completes, fold its result back into MAIN conversation ` +
-    `(no fake Temporal — registry fold-back only).`
+    `(no fake Temporal — parent+child Session via host subagent when linked).`
+  )
+}
+
+/**
+ * Build degraded-fork notice when host `ctx.subagents` is unavailable (P1.5).
+ * Keeps 0.1.8 registry sibling + single-Agent cancel-then-claim semantics.
+ */
+export function buildUnitForkDegradedBlock(main: WorkUnit, sibling: WorkUnit): string {
+  return (
+    `${UNIT_FORK_DEGRADED_MARKER} Host ctx.subagents.startActivation unavailable; ` +
+    `registry-only sibling ${sibling.id} (lane: ${sibling.lane}, goal: ${sibling.goalSummary}) ` +
+    `under MAIN ${main.id}. No second LLM — falling back to single-Agent cancel-then-claim ` +
+    `(0.1.8 fork bookkeeping). Mount dsh-subagent + spawn/fork-in-process for true parallel.`
   )
 }
 
@@ -522,6 +572,8 @@ export class WorkUnitRegistry {
       deliverySpec: input.deliverySpec ?? null,
       deliveryPayload: null,
       lastPeerPacket: null,
+      childSessionId: null,
+      activationRef: null,
     }
     this.units.set(id, unit)
     return unit
@@ -552,12 +604,37 @@ export class WorkUnitRegistry {
         ? { ...unit.deliverySpec, shape: [...unit.deliverySpec.shape] }
         : null,
       deliverySpecMet: isDeliverySpecMet(unit),
+      childSessionId: unit.childSessionId,
+      activationRef: unit.activationRef
+        ? { ...unit.activationRef }
+        : null,
     }
   }
 
   /** List siblings (children) of a parent unit. */
   siblingsOf(parentId: string): WorkUnit[] {
     return this.list().filter(u => u.parentId === parentId)
+  }
+
+  /** P1.5: find the WorkUnit linked to a host child Session id. */
+  byChildSessionId(childSessionId: string): WorkUnit | undefined {
+    return this.list().find(u => u.childSessionId === childSessionId)
+  }
+
+  /**
+   * P1.5: attach host activation identity to a sibling unit after
+   * `startActivation` publishes a child.
+   */
+  linkChildActivation(unitId: string, ref: WorkUnitActivationRef): void {
+    const unit = this.units.get(unitId)
+    if (!unit) throw new Error(`WorkUnitRegistry: unknown unit "${unitId}"`)
+    unit.childSessionId = ref.childSessionId
+    unit.activationRef = {
+      childSessionId: ref.childSessionId,
+      provider: ref.provider,
+      ...(ref.runId !== undefined ? { runId: ref.runId } : {}),
+    }
+    if (unit.lane === 'user') unit.lane = 'background'
   }
 
   /** List units on a given lane. */
@@ -685,10 +762,15 @@ export class WorkUnitRegistry {
     status?: WorkUnitStatus
     deliverySpec?: DeliverySpec | null
     bindActive?: boolean
+    /**
+     * When true (default), pause a running parent — registry-only / degraded fork.
+     * P1.5 subagent-backed parallel sets false so MAIN stays running beside the child.
+     */
+    pauseParent?: boolean
   }): WorkUnit {
     const parent = this.units.get(options.parentId)
     if (!parent) throw new Error(`WorkUnitRegistry: unknown parent unit "${options.parentId}"`)
-    if (parent.status === 'running') parent.status = 'paused'
+    if (options.pauseParent !== false && parent.status === 'running') parent.status = 'paused'
     const sibling = this.create({
       goalSummary: options.goalSummary,
       lane: options.lane ?? 'user',
@@ -862,6 +944,8 @@ export class WorkUnitRegistry {
                 : {}),
             }
           : null,
+        childSessionId: u.childSessionId,
+        activationRef: u.activationRef ? { ...u.activationRef } : null,
       })),
     }
   }

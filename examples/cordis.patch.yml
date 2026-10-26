@@ -1,5 +1,16 @@
 # Example profile overlay (~/.dsh/profiles/<name>/cordis.patch.yml)
 # Cordis cannot rename an existing id's package; disable stock then insert.
+#
+# True-parallel OTHER (P1.5) also needs host subagent packages in the profile,
+# for example (add alongside this overlay — names match dsh 0.2.1-rc.3 line):
+#   - id: subagent
+#     name: '@deepseek-ai/dsh-subagent'
+#   - id: subagent-spawn
+#     name: '@deepseek-ai/dsh-subagent-spawn-in-process'
+# Optional history-seeded child:
+#   - id: subagent-fork
+#     name: '@deepseek-ai/dsh-subagent-fork-in-process'
+# Then set rpwuOtherMode: fork (or subagent) below.
 
 - id: agent-loop
   disabled: true
@@ -18,8 +29,12 @@
         steerFoldMode: bot-like
         steerResumeAnchor: true
         rpwuEnabled: true
-        # fold (default): OTHER folds into MAIN (0.1.7 short-protocol). fork: sibling unit.
+        # fold (default): OTHER folds into MAIN (0.1.7 short-protocol).
+        # fork|subagent: start a host child Session via ctx.subagents.startActivation;
+        # without dsh-subagent (+ spawn), degrades to registry-only + [grokbot-unit-fork-degraded].
         rpwuOtherMode: fold
+        rpwuSubagentProvider: spawn
+        rpwuSubagentDelivery: caller
         deliveryGate: true
         deliveryGateMaxRetries: 2
         agents: []

@@ -1,7 +1,7 @@
 {
   "name": "@harness-plugins/grokbot-agent-loop",
   "description": "GrokBot Loop — interruptible dual-lane agent-loop plugin for DeepSeek Harness (community homage; not affiliated with xAI)",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -28,7 +28,8 @@
     "NOTICE",
     "LICENSE",
     "README.md",
-    "README.zh.md"
+    "README.zh.md",
+    "docs/**/*.md"
   ],
   "repository": {
     "type": "git",
@@ -70,6 +71,8 @@
     "@deepseek-ai/dsh-session": "0.2.1-rc.3",
     "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.3",
     "@deepseek-ai/dsh-session-projection": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-subagent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-rc.3",
     "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.3",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.3"
   },
@@ -88,10 +91,20 @@
     "@deepseek-ai/dsh-session": "0.2.1-rc.3",
     "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.3",
     "@deepseek-ai/dsh-session-projection": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-subagent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-rc.3",
     "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.3",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
     "@types/node": "^22.20.1",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-subagent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subagent-spawn-in-process": {
+      "optional": true
+    }
   }
 }

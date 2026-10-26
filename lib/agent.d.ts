@@ -77,10 +77,20 @@ export declare class ReactLoopAgent implements Agent {
     /** RPWU P0 master switch (default on). When false, behavior ≈0.1.5. */
     private rpwuEnabled;
     /**
-     * RPWU P1-a: how OTHER joins the registry on preempt.
+     * RPWU P1-a / P1.5: how OTHER joins the registry on preempt.
      * Default `fold` preserves 0.1.7 short-protocol behavior.
+     * `fork` / `subagent` try host startActivation (degrade if missing).
      */
     private rpwuOtherMode;
+    /** P1.5: host provider name for fork activations (default `spawn`). */
+    private rpwuSubagentProvider;
+    /** P1.5: activation delivery policy (default `caller` so we fold ourselves). */
+    private rpwuSubagentDelivery;
+    /**
+     * In-flight subagent fold controllers keyed by sibling unit id.
+     * Abort on agent dispose; settle path folds into MAIN.
+     */
+    private readonly subagentForkAborts;
     /** DeliveryGate (default on when RPWU is on). */
     private deliveryGateEnabled;
     /** Max DeliveryGate continuation injections per unit (default 2). */
@@ -106,8 +116,21 @@ export declare class ReactLoopAgent implements Agent {
     /**
      * Apply {@link decideAdmission} and execute cancel-then-claim when required.
      * Stock `send()` remains available for callers that need the legacy remap.
+     *
+     * P1.5: when `rpwuOtherMode` is fork/subagent and host `ctx.subagents` is
+     * present, OTHER starts a child Session via `startActivation` while MAIN
+     * keeps running (no cancel). Missing seam → 0.1.8 registry fork + degrade notice.
      */
     private admit;
+    /**
+     * P1.5: when host `ctx.subagents` is mounted, start OTHER on a child Session
+     * and leave MAIN running. Returns true when the parallel path was taken.
+     */
+    private tryAdmitSubagentFork;
+    /** Fire host activation and fold the settled result back into MAIN. */
+    private launchSubagentFork;
+    /** Map child result → peer packet → foldSiblingIntoMain + inbox notice. */
+    private foldSubagentSiblingIntoMain;
     cancel(cause: AgentCancelCause, options?: CancelOptions): void;
     runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T>;
     /**

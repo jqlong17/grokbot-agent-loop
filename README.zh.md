@@ -66,9 +66,22 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - `steerFoldMode`（默认 `bot-like`）— `bot-like` 用完整两阶段契约文案；`minimal` 用更短 notice，顺序契约相同
 - `steerResumeAnchor`（默认 `true`）— 抢占 fold notice 嵌入未完成 MAIN 用户原文摘要（≤1200 字），强制同一条可见对话里续写；`false` 时≈0.1.4（无锚点引用）
 - `rpwuEnabled`（默认 `true`）— RPWU：会话内 WorkUnit 注册表 + step checkpoint + fold-into-unit；`false` 时≈0.1.5
-- `rpwuOtherMode`（默认 `fold`）— P1-a：`fold` 把 OTHER 折进 MAIN（保持 0.1.7 短协议）；`fork` 创建可独立查询的 sibling WorkUnit，完成后可 fold-back 回 MAIN
+- `rpwuOtherMode`（默认 `fold`）— P1-a/P1.5：`fold` 把 OTHER 折进 MAIN（保持 0.1.7 短协议）；`fork` / `subagent` 走宿主 `ctx.subagents.startActivation` 拉起子 Session；无 seam 时降级为 registry-only + `[grokbot-unit-fork-degraded]`
+- `rpwuSubagentProvider`（默认 `spawn`）— `startActivation` 的 provider 名（`spawn` / `fork`）
+- `rpwuSubagentDelivery`（默认 `caller`）— `caller` 由插件 await 结果并 fold；`parent` 同时走宿主父级通知
 - `deliveryGate`（默认 `true`，依赖 RPWU）— 非实质/仅 workspace 交付时不让 unit 完成；若 unit 带 `deliverySpec`，一并校验 shape + sink
 - `deliveryGateMaxRetries`（默认 `2`）— 每个 unit 最多 DeliveryGate 续跑次数
+
+### 0.1.9 改动摘要
+
+**P1.5 subagent 真并行**（跟进 0.1.8 / PR #6）。规格见 [`docs/rpwu-p15-subagent-parallel.md`](./docs/rpwu-p15-subagent-parallel.md)。
+
+- `rpwuOtherMode: fork|subagent` 调用 `ctx.subagents.startActivation`：OTHER 在**子 Agent + 子 Session**跑，MAIN **不 cancel**，父子可同时飞
+- sibling 挂 `childSessionId` / `activationRef`；子结算后 `foldSiblingIntoMain` / peer 包 + DeliveryGate
+- 未挂 subagent：可见 `[grokbot-unit-fork-degraded]`，回落 0.1.8 单 Agent cancel-then-claim，不崩
+- 默认 `fold` 短协议不变
+
+诚实边界：并行 = **父 Session + 子 Session（宿主 subagent）**，不是 Temporal，也不是同 Agent 双 kick。需在 profile 挂 `@deepseek-ai/dsh-subagent` + `dsh-subagent-spawn-in-process`（可选 fork-in-process）。
 
 ### 0.1.8 改动摘要
 
@@ -78,7 +91,7 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - **P1-b agent-lane peer 回报** — `acceptPeerHandoff`：后台/peer 完成 → 结构化包（`theme` / `keyPoints` / `todos`）→ 折进 MAIN（`[grokbot-peer-handoff]`）
 - **P1-c deliverySpec** — WorkUnit 可选 `{ shape, sink }`；gate 在有契约时验字段；无契约时保留 0.1.7 sticky chatPosted / workspaceOnly
 
-诚实边界：真·多 model 并行仍属宿主；本版在单 Agent 会话内提供 registry 级 sibling + 结构化折回。
+诚实边界（fork 真并行缺口已由 0.1.9 接上）：0.1.8 fork 仍是单 Agent 会话内的 registry 记账。
 
 ### 0.1.7 改动摘要
 
@@ -126,7 +139,8 @@ npm run smoke
 ## v1 明确非目标
 
 - Temporal / 云端耐久 runner
-- 多 bot 编排
+- 改 dsh `Phase` 允许多 kick
+- 在本插件内嵌 subagent 后端
 - 宣称官方 Grok Bot 产品
 
 ## 许可

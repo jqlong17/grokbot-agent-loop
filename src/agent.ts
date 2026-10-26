@@ -23,6 +23,7 @@ import {
   LlmError,
   createAssistantMessage,
   createDeveloperMessage,
+  createUserMessage,
   errorChain,
   markAgentLoopRequest,
 } from '@deepseek-ai/dsh-llm'
@@ -57,13 +58,22 @@ import {
   buildDeliveryGateNotice,
   buildUnitFoldBlock,
   buildUnitForkBlock,
+  buildUnitForkDegradedBlock,
   inferDeliveryFromBlocks,
+  normalizeRpwuOtherMode,
   shouldRunDeliveryGate,
+  summarizeGoal,
   type DeliveryGateMeta,
   type RpwuOtherMode,
   type StepCheckpoint,
   type WorkUnit,
 } from './work-unit.ts'
+import {
+  peerPacketFromSubagentResult,
+  resolveSubagentsRuntime,
+  startWorkUnitSubagent,
+  type SubagentResultLike,
+} from './work-unit-subagent.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -258,13 +268,33 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
-   * RPWU P1-a: how OTHER joins the registry on preempt.
+   * RPWU P1-a / P1.5: how OTHER joins the registry on preempt.
    * Default `fold` preserves 0.1.7 short-protocol behavior.
+   * `fork` / `subagent` try host startActivation (degrade if missing).
    */
-  private rpwuOtherMode(): RpwuOtherMode {
+  private rpwuOtherMode(): 'fold' | 'fork' {
     const config = this.loopCtx.agentLoop?.config as { rpwuOtherMode?: RpwuOtherMode } | undefined
-    return config?.rpwuOtherMode === 'fork' ? 'fork' : 'fold'
+    return normalizeRpwuOtherMode(config?.rpwuOtherMode)
   }
+
+  /** P1.5: host provider name for fork activations (default `spawn`). */
+  private rpwuSubagentProvider(): string {
+    const config = this.loopCtx.agentLoop?.config as { rpwuSubagentProvider?: string } | undefined
+    const name = config?.rpwuSubagentProvider?.trim()
+    return name && name.length > 0 ? name : 'spawn'
+  }
+
+  /** P1.5: activation delivery policy (default `caller` so we fold ourselves). */
+  private rpwuSubagentDelivery(): 'parent' | 'caller' {
+    const config = this.loopCtx.agentLoop?.config as { rpwuSubagentDelivery?: 'parent' | 'caller' } | undefined
+    return config?.rpwuSubagentDelivery === 'parent' ? 'parent' : 'caller'
+  }
+
+  /**
+   * In-flight subagent fold controllers keyed by sibling unit id.
+   * Abort on agent dispose; settle path folds into MAIN.
+   */
+  private readonly subagentForkAborts = new Map<string, AbortController>()
 
   /** DeliveryGate (default on when RPWU is on). */
   private deliveryGateEnabled(): boolean {
@@ -444,11 +474,21 @@ export class ReactLoopAgent implements Agent {
   /**
    * Apply {@link decideAdmission} and execute cancel-then-claim when required.
    * Stock `send()` remains available for callers that need the legacy remap.
+   *
+   * P1.5: when `rpwuOtherMode` is fork/subagent and host `ctx.subagents` is
+   * present, OTHER starts a child Session via `startActivation` while MAIN
+   * keeps running (no cancel). Missing seam → 0.1.8 registry fork + degrade notice.
    */
   private admit(kind: AdmissionKind, input: UserMessage): void {
     const decision = decideAdmission(kind, this.schedulerState())
 
     if (decision.preempt) {
+      // P1.5 parallel fork: try host subagent BEFORE cancel so MAIN can keep flying.
+      if (this.rpwuEnabled() && this.rpwuOtherMode() === 'fork') {
+        const parallel = this.tryAdmitSubagentFork(input)
+        if (parallel) return
+      }
+
       // 1) Cooperative cancel — streamed assistant prefix stays in the session log.
       this.cancel({ kind: 'user' }, { keepInbox: true })
       // 2) Claim path: human OTHER first, optional fold notice (+ MAIN anchor) after.
@@ -460,7 +500,7 @@ export class ReactLoopAgent implements Agent {
       let boundUnit: WorkUnit | null = null
       let siblingUnit: WorkUnit | null = null
       let unitBlock: string | null = null
-      let otherMode: RpwuOtherMode | null = null
+      let otherMode: 'fold' | 'fork' | null = null
       if (this.rpwuEnabled()) {
         otherMode = this.rpwuOtherMode()
         const turn = this.phase.kind === 'running' ? this.phase.turn : 0
@@ -493,6 +533,7 @@ export class ReactLoopAgent implements Agent {
         this.lastCheckpoint = mainCp
 
         if (otherMode === 'fork') {
+          // Degraded path: host subagent missing — registry sibling + single Agent.
           siblingUnit = this.workUnits.forkSibling({
             parentId: boundUnit.id,
             goalSummary: otherText,
@@ -515,7 +556,7 @@ export class ReactLoopAgent implements Agent {
             reason: 'preempt',
           })
           this.lastCheckpoint = siblingCp
-          unitBlock = buildUnitForkBlock(boundUnit, siblingUnit)
+          unitBlock = buildUnitForkDegradedBlock(boundUnit, siblingUnit)
         } else {
           this.workUnits.foldOther(boundUnit.id, otherText)
           unitBlock = buildUnitFoldBlock(boundUnit)
@@ -532,6 +573,8 @@ export class ReactLoopAgent implements Agent {
         unitFoldPresent: boundUnit !== null,
         otherMode,
         siblingUnitId: siblingUnit?.id ?? null,
+        forkDegraded: otherMode === 'fork',
+        childSessionId: null,
       })
       // 3) Latch wake so kick() restarts after the aborted activity drains.
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = true
@@ -552,12 +595,226 @@ export class ReactLoopAgent implements Agent {
     this.send(input, decision.target, decision.wakeup)
   }
 
+  /**
+   * P1.5: when host `ctx.subagents` is mounted, start OTHER on a child Session
+   * and leave MAIN running. Returns true when the parallel path was taken.
+   */
+  private tryAdmitSubagentFork(input: UserMessage): boolean {
+    // Duck-typed optional host seam — avoid hard-depending on dsh-subagent types.
+    const subagents = resolveSubagentsRuntime({ ctx: this.loopCtx })
+    if (!subagents) return false
+
+    const foldEnabled = this.steerFoldHintEnabled()
+    const mode = foldEnabled ? this.steerFoldMode() : null
+    const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
+    const turn = this.phase.kind === 'running' ? this.phase.turn : 0
+    const step = this.phase.kind === 'running' ? this.phase.step : 0
+    const goalText = resumeAnchor
+      ?? extractLatestHumanUserText(this.session, {
+        excludeText: userMessagePlainText(input),
+      })
+      ?? 'unspecified MAIN'
+    const otherText = userMessagePlainText(input) ?? 'OTHER'
+    const prefix = this.latestAssistantPrefixStats()
+
+    // MAIN stays running — do not cancel the live LLM kick.
+    const boundUnit = this.workUnits.ensureMainUnit({
+      goalSummary: goalText,
+      turn,
+      step,
+      status: 'running',
+    })
+    const mainCp = this.workUnits.appendCheckpoint({
+      unitId: boundUnit.id,
+      stepIndex: step,
+      turn,
+      assistantPrefixCursor: prefix.cursor,
+      assistantPrefixHash: prefix.hash,
+      toolResultRefs: [],
+      status: 'running',
+      delivery: { ...boundUnit.delivery },
+      reason: 'preempt',
+    })
+    this.lastCheckpoint = mainCp
+
+    const siblingUnit = this.workUnits.forkSibling({
+      parentId: boundUnit.id,
+      goalSummary: otherText,
+      lane: 'background',
+      createdAtTurn: turn,
+      createdAtStep: step,
+      status: 'running',
+      bindActive: false,
+      // Parent keeps its live LLM kick; child Session handles OTHER.
+      pauseParent: false,
+    })
+    const siblingCp = this.workUnits.appendCheckpoint({
+      unitId: siblingUnit.id,
+      stepIndex: step,
+      turn,
+      assistantPrefixCursor: 0,
+      assistantPrefixHash: prefix.hash,
+      toolResultRefs: [],
+      status: 'running',
+      delivery: { ...siblingUnit.delivery },
+      reason: 'preempt',
+    })
+    this.lastCheckpoint = siblingCp
+
+    const abort = new AbortController()
+    this.subagentForkAborts.set(siblingUnit.id, abort)
+
+    // Observability notice only — OTHER itself runs on the child, not parent next-step.
+    const noticeText = buildUnitForkBlock(boundUnit, siblingUnit)
+    this.inbox.splice('next-step', Infinity, 0, [
+      createUserMessage({
+        content: [{ type: 'text', text: noticeText }],
+        source: {
+          kind: 'unit-fold-hint',
+          form: 'notice',
+          summary: `Subagent fork: ${siblingUnit.id} under MAIN ${boundUnit.id}`,
+        },
+      }),
+    ])
+
+    this.lastSteerPreempt = buildSteerPreemptMeta({
+      foldInjected: foldEnabled,
+      mode,
+      resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
+      unitId: boundUnit.id,
+      unitFoldPresent: true,
+      otherMode: 'fork',
+      siblingUnitId: siblingUnit.id,
+      forkDegraded: false,
+      childSessionId: null,
+    })
+
+    void this.launchSubagentFork({
+      siblingId: siblingUnit.id,
+      mainId: boundUnit.id,
+      otherText,
+      subagents,
+      signal: abort.signal,
+    })
+
+    return true
+  }
+
+  /** Fire host activation and fold the settled result back into MAIN. */
+  private async launchSubagentFork(options: {
+    siblingId: string
+    mainId: string
+    otherText: string
+    subagents: NonNullable<ReturnType<typeof resolveSubagentsRuntime>>
+    signal: AbortSignal
+  }): Promise<void> {
+    try {
+      const started = await startWorkUnitSubagent({
+        subagents: options.subagents,
+        parent: this,
+        promptText: options.otherText,
+        label: summarizeGoal(options.otherText, 48),
+        provider: this.rpwuSubagentProvider(),
+        delivery: this.rpwuSubagentDelivery(),
+        signal: options.signal,
+      })
+      if (options.signal.aborted) {
+        try { await started.activation.dispose() } catch { /* ignore */ }
+        return
+      }
+      this.workUnits.linkChildActivation(options.siblingId, started.activationRef)
+      if (this.lastSteerPreempt?.siblingUnitId === options.siblingId) {
+        this.lastSteerPreempt = {
+          ...this.lastSteerPreempt,
+          childSessionId: started.activationRef.childSessionId,
+          forkDegraded: false,
+        }
+      }
+      // Refresh fork notice text now that childSessionId is known (best-effort).
+      const sibling = this.workUnits.get(options.siblingId)
+      const main = this.workUnits.get(options.mainId)
+      if (sibling && main) {
+        // no-op beyond link — fold-back carries the visible result
+      }
+
+      let result: SubagentResultLike
+      try {
+        result = await started.activation.result
+      } catch (err) {
+        result = {
+          output: [],
+          stopReason: 'error',
+          diagnostic: err instanceof Error ? err.message : String(err),
+        }
+      }
+      if (options.signal.aborted) return
+      this.foldSubagentSiblingIntoMain(options.siblingId, result)
+    } catch (err) {
+      // Activation failed after we chose the parallel path — mark sibling + notice.
+      const sibling = this.workUnits.get(options.siblingId)
+      const main = this.workUnits.get(options.mainId)
+      if (sibling) {
+        this.workUnits.markStatus(sibling.id, 'cancelled')
+      }
+      const detail = err instanceof Error ? err.message : String(err)
+      if (main && sibling) {
+        const text =
+          `${buildUnitForkDegradedBlock(main, sibling)} ` +
+          `startActivation failed: ${summarizeGoal(detail, 160)}`
+        this.inbox.splice('next-step', Infinity, 0, [
+          createUserMessage({
+            content: [{ type: 'text', text }],
+            source: {
+              kind: 'unit-fold-hint',
+              form: 'notice',
+              summary: `Subagent fork failed → degrade notice for ${sibling.id}`,
+            },
+          }),
+        ])
+        if (this.phase.kind === 'idle') this.wakeDriver(false)
+        else this.phase.wakeRequested = true
+      }
+      if (this.lastSteerPreempt?.siblingUnitId === options.siblingId) {
+        this.lastSteerPreempt = {
+          ...this.lastSteerPreempt,
+          forkDegraded: true,
+          childSessionId: null,
+        }
+      }
+    } finally {
+      this.subagentForkAborts.delete(options.siblingId)
+    }
+  }
+
+  /** Map child result → peer packet → foldSiblingIntoMain + inbox notice. */
+  private foldSubagentSiblingIntoMain(siblingId: string, result: SubagentResultLike): void {
+    const sibling = this.workUnits.get(siblingId)
+    if (!sibling || !sibling.parentId) return
+    const packet = peerPacketFromSubagentResult(result, sibling.goalSummary)
+    const { notice } = this.workUnits.foldSiblingIntoMain({
+      siblingId,
+      packet,
+      deliveryGate: this.deliveryGateEnabled(),
+      maxRetries: this.deliveryGateMaxRetries(),
+    })
+    this.inbox.splice('next-step', Infinity, 0, [notice])
+    if (this.phase.kind === 'idle') this.wakeDriver(false)
+    else this.phase.wakeRequested = true
+  }
+
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
     if (!options.keepInbox) {
       this.inbox.clear()
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
     }
     if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
+    // Drop in-flight P1.5 child activations when the parent is disposed.
+    if (cause.kind === 'disposed') {
+      for (const [id, abort] of this.subagentForkAborts) {
+        abort.abort()
+        this.subagentForkAborts.delete(id)
+      }
+    }
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {

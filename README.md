@@ -47,12 +47,14 @@ The package ships `cordis.patch.yml` that replaces Cordis id `agent-loop`:
     steerResumeAnchor: true
     rpwuEnabled: true
     rpwuOtherMode: fold
+    rpwuSubagentProvider: spawn
+    rpwuSubagentDelivery: caller
     deliveryGate: true
     deliveryGateMaxRetries: 2
     agents: []
 ```
 
-See [`examples/cordis.patch.yml`](./examples/cordis.patch.yml) for a copy-paste profile overlay.
+See [`examples/cordis.patch.yml`](./examples/cordis.patch.yml) for a copy-paste profile overlay (includes optional `dsh-subagent` + spawn deps for P1.5).
 
 ### Manual profile patch
 
@@ -80,9 +82,22 @@ Config flags:
 - `steerFoldMode` (default `bot-like`) — `bot-like` full two-phase copy; `minimal` shorter notice, same ordering contract
 - `steerResumeAnchor` (default `true`) — embed a truncated unfinished MAIN user quote in the fold notice so the model resumes the exact prior deliverable in visible chat; set `false` for 0.1.4-style notices
 - `rpwuEnabled` (default `true`) — RPWU WorkUnit registry + step checkpoints + fold-into-unit; set `false` for ≈0.1.5 behavior
-- `rpwuOtherMode` (default `fold`) — P1-a: `fold` keeps OTHER inside MAIN (0.1.7 short-protocol); `fork` creates an independently queryable sibling WorkUnit that can fold back into MAIN when complete
+- `rpwuOtherMode` (default `fold`) — P1-a/P1.5: `fold` keeps OTHER inside MAIN (0.1.7 short-protocol); `fork` / `subagent` try host `ctx.subagents.startActivation` for a real child Session, then fold back into MAIN; without the seam, degrade to registry-only + `[grokbot-unit-fork-degraded]`
+- `rpwuSubagentProvider` (default `spawn`) — provider name for `startActivation` (`spawn` or `fork`)
+- `rpwuSubagentDelivery` (default `caller`) — `caller` = plugin awaits result and folds; `parent` also lets the host inject a parent notice
 - `deliveryGate` (default `true`, requires RPWU) — block unit completion on non-substantive / workspace-only delivery; when a unit has `deliverySpec`, also verify shape + sink
 - `deliveryGateMaxRetries` (default `2`) — max DeliveryGate continuation injections per unit
+
+### 0.1.9 notes
+
+**P1.5 subagent-backed true parallel** (follow-up to 0.1.8 / PR #6). Spec: [`docs/rpwu-p15-subagent-parallel.md`](./docs/rpwu-p15-subagent-parallel.md).
+
+- `rpwuOtherMode: fork|subagent` calls `ctx.subagents.startActivation` so OTHER runs on a **child Agent + child Session** while MAIN keeps its live turn (parent is not cancelled).
+- Sibling WorkUnit gains `childSessionId` / `activationRef`; settle → `foldSiblingIntoMain` / peer packet + DeliveryGate.
+- Missing host seam → visible `[grokbot-unit-fork-degraded]` + 0.1.8 registry-only cancel-then-claim (no crash).
+- Default `fold` short-protocol unchanged.
+
+Honest limit: parallel means **parent Session + child Session via host subagent** — not Temporal, not same-Agent dual LLM kick. Mount `@deepseek-ai/dsh-subagent` + `dsh-subagent-spawn-in-process` (optional fork-in-process) in the profile.
 
 ### 0.1.8 notes
 
@@ -92,7 +107,7 @@ RPWU P1 slice toward Grok Bot–like work mode (community homage; **not** affili
 - **P1-b agent-lane peer return** — `acceptPeerHandoff` models background/peer finished → structured packet (`theme` / `keyPoints` / `todos`) → fold into MAIN conversation (`[grokbot-peer-handoff]`).
 - **P1-c deliverySpec** — optional `{ shape, sink }` on WorkUnit; DeliveryGate verifies the contract when present; sticky `chatPosted` + `workspaceOnly` from 0.1.7 unchanged for units without a spec.
 
-Honest limit: true multi-model parallel still belongs to the Grok/dsh host; this release enables registry-level sibling units + structured fold-back inside one Agent session.
+Honest limit (closed in 0.1.9 for the fork path): 0.1.8 fork was registry-level sibling bookkeeping inside one Agent session.
 
 ### 0.1.7 notes
 
@@ -135,7 +150,8 @@ npm run smoke     # entry + scheduler dry-run
 ## Intentional v1 non-goals
 
 - Temporal / durable cloud runner
-- Multi-bot orchestration
+- Changing dsh `Phase` to allow same-Agent multi-kick
+- Embedding a subagent backend inside this plugin
 - Claiming to be an official Grok Bot product
 
 ## License
