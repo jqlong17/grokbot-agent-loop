@@ -77,6 +77,7 @@ export {
   WorkUnitRegistry,
   UNIT_FOLD_MARKER,
   UNIT_FORK_MARKER,
+  UNIT_FORK_DEGRADED_MARKER,
   UNIT_FOLD_BACK_MARKER,
   PEER_HANDOFF_MARKER,
   DELIVERY_GATE_MARKER,
@@ -91,6 +92,7 @@ export {
   buildUnitFoldBackNotice,
   buildUnitFoldBlock,
   buildUnitForkBlock,
+  buildUnitForkDegradedBlock,
   canMarkCompleted,
   defaultPeerDeliverySpec,
   inferDeliveryFromBlocks,
@@ -99,6 +101,7 @@ export {
   isPeerHandoffNotice,
   isSubstantiveAssistantText,
   normalizePeerHandoffPacket,
+  normalizeRpwuOtherMode,
   peerPacketToPayload,
   shouldRunDeliveryGate,
   simpleTextHash,
@@ -115,12 +118,24 @@ export {
   type StepCheckpoint,
   type ToolResultRef,
   type WorkUnit,
+  type WorkUnitActivationRef,
   type WorkUnitDelivery,
   type WorkUnitLane,
   type WorkUnitQuery,
   type WorkUnitSnapshot,
   type WorkUnitStatus,
 } from './work-unit.ts'
+
+export {
+  peerPacketFromSubagentResult,
+  resolveSubagentsRuntime,
+  startWorkUnitSubagent,
+  type StartedWorkUnitSubagent,
+  type StartWorkUnitSubagentOptions,
+  type SubagentActivationLike,
+  type SubagentResultLike,
+  type SubagentsRuntimeLike,
+} from './work-unit-subagent.ts'
 
 /**
  * Fiber states that cannot own or serve a new lifecycle.
@@ -426,11 +441,21 @@ export interface Config {
    */
   rpwuEnabled: boolean
   /**
-   * RPWU P1-a: how a preempting OTHER workstream joins the registry.
+   * RPWU P1-a / P1.5: how a preempting OTHER workstream joins the registry.
    * - `fold` (default): fold into MAIN — preserves 0.1.7 short-protocol behavior
-   * - `fork`: create an independently queryable sibling WorkUnit; complete → fold-back
+   * - `fork` / `subagent`: try host `ctx.subagents.startActivation` for a real
+   *   child Session; degrade to registry-only sibling when the seam is absent
    */
-  rpwuOtherMode: 'fold' | 'fork'
+  rpwuOtherMode: 'fold' | 'fork' | 'subagent'
+  /**
+   * P1.5: provider name passed to `startActivation` when fork/subagent mode
+   * has a live host seam (default `spawn`).
+   */
+  rpwuSubagentProvider: string
+  /**
+   * P1.5: activation delivery policy (default `caller` — plugin folds result).
+   */
+  rpwuSubagentDelivery: 'parent' | 'caller'
   /**
    * When true (default, requires rpwuEnabled), a unit cannot complete on
    * workspace-only / non-substantive delivery; inject chat-visible continuations.
@@ -486,7 +511,9 @@ export class AgentLoop extends Service implements AgentFactory {
     steerFoldMode?: 'bot-like' | 'minimal'
     steerResumeAnchor?: boolean
     rpwuEnabled?: boolean
-    rpwuOtherMode?: 'fold' | 'fork'
+    rpwuOtherMode?: 'fold' | 'fork' | 'subagent'
+    rpwuSubagentProvider?: string
+    rpwuSubagentDelivery?: 'parent' | 'caller'
     deliveryGate?: boolean
     deliveryGateMaxRetries?: number
   }, Config> = z.object({
@@ -496,7 +523,9 @@ export class AgentLoop extends Service implements AgentFactory {
     steerFoldMode: z.union(['bot-like', 'minimal']).default('bot-like'),
     steerResumeAnchor: z.boolean().default(true),
     rpwuEnabled: z.boolean().default(true),
-    rpwuOtherMode: z.union(['fold', 'fork']).default('fold'),
+    rpwuOtherMode: z.union(['fold', 'fork', 'subagent']).default('fold'),
+    rpwuSubagentProvider: z.string().default('spawn'),
+    rpwuSubagentDelivery: z.union(['parent', 'caller']).default('caller'),
     deliveryGate: z.boolean().default(true),
     deliveryGateMaxRetries: z.number().step(1).min(0).default(2),
     agents: z.array(z.object({
@@ -517,7 +546,9 @@ export class AgentLoop extends Service implements AgentFactory {
     steerFoldMode?: 'bot-like' | 'minimal'
     steerResumeAnchor?: boolean
     rpwuEnabled?: boolean
-    rpwuOtherMode?: 'fold' | 'fork'
+    rpwuOtherMode?: 'fold' | 'fork' | 'subagent'
+    rpwuSubagentProvider?: string
+    rpwuSubagentDelivery?: 'parent' | 'caller'
     deliveryGate?: boolean
     deliveryGateMaxRetries?: number
   }, Config>
@@ -539,7 +570,14 @@ export class AgentLoop extends Service implements AgentFactory {
       steerFoldMode: config.steerFoldMode ?? 'bot-like',
       steerResumeAnchor: config.steerResumeAnchor !== false,
       rpwuEnabled: config.rpwuEnabled !== false,
-      rpwuOtherMode: config.rpwuOtherMode === 'fork' ? 'fork' : 'fold',
+      rpwuOtherMode: config.rpwuOtherMode === 'fork' || config.rpwuOtherMode === 'subagent'
+        ? config.rpwuOtherMode
+        : 'fold',
+      rpwuSubagentProvider: typeof config.rpwuSubagentProvider === 'string'
+        && config.rpwuSubagentProvider.trim().length > 0
+        ? config.rpwuSubagentProvider.trim()
+        : 'spawn',
+      rpwuSubagentDelivery: config.rpwuSubagentDelivery === 'parent' ? 'parent' : 'caller',
       deliveryGate: config.deliveryGate !== false,
       deliveryGateMaxRetries: typeof config.deliveryGateMaxRetries === 'number'
         ? Math.max(0, Math.floor(config.deliveryGateMaxRetries))

@@ -7,12 +7,14 @@ import {
   WorkUnitRegistry,
   UNIT_FOLD_MARKER,
   UNIT_FORK_MARKER,
+  UNIT_FORK_DEGRADED_MARKER,
   UNIT_FOLD_BACK_MARKER,
   PEER_HANDOFF_MARKER,
   DELIVERY_GATE_MARKER,
   buildDeliveryGateNotice,
   buildUnitFoldBlock,
   buildUnitForkBlock,
+  buildUnitForkDegradedBlock,
   buildUnitFoldBackNotice,
   canMarkCompleted,
   defaultPeerDeliverySpec,
@@ -146,6 +148,34 @@ describe('RPWU P1-a fold|fork', () => {
     expect(block).toContain(UNIT_FORK_MARKER)
     expect(block).toContain(sibling.id)
     expect(block).toContain(main.id)
+
+    const degraded = buildUnitForkDegradedBlock(main, sibling)
+    expect(degraded).toContain(UNIT_FORK_DEGRADED_MARKER)
+    expect(degraded).toContain(sibling.id)
+  })
+
+  it('P1.5 linkChildActivation attaches childSessionId and background lane', () => {
+    const reg = new WorkUnitRegistry()
+    const main = reg.ensureMainUnit({ goalSummary: 'MAIN CLI', turn: 1, step: 1 })
+    const sibling = reg.forkSibling({
+      parentId: main.id,
+      goalSummary: 'OTHER packing',
+      lane: 'user',
+      bindActive: false,
+      pauseParent: false,
+    })
+    expect(main.status).toBe('running')
+    expect(sibling.childSessionId).toBeNull()
+    reg.linkChildActivation(sibling.id, {
+      childSessionId: 'child-sess-9',
+      provider: 'spawn',
+    })
+    expect(sibling.childSessionId).toBe('child-sess-9')
+    expect(sibling.lane).toBe('background')
+    expect(sibling.activationRef?.provider).toBe('spawn')
+    expect(reg.byChildSessionId('child-sess-9')?.id).toBe(sibling.id)
+    expect(reg.query(sibling.id)?.childSessionId).toBe('child-sess-9')
+    expect(buildUnitForkBlock(main, sibling)).toContain('child-sess-9')
   })
 
   it('fold path still works: foldOther stays on MAIN without sibling', () => {
