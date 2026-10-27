@@ -70,15 +70,15 @@ import {
 import {
   peerPacketFromSubagentResult,
   resolveSubagentsRuntime,
-  startWorkUnitSubagent,
   type SubagentResultLike,
 } from './unit/subagent.ts'
+import { ActivationManager } from './unit/activation-manager.ts'
 import { Orchestrator } from './orchestrator/orchestrator.ts'
 import { MergeBus } from './merge/bus.ts'
 import { MemoryCheckpointStore, FileCheckpointStore } from './checkpoint/index.ts'
 import type { CheckpointStore } from './checkpoint/store.ts'
 import { AgentEventBus } from './events.ts'
-import { settleTurn } from './settle.ts'
+import { TurnRunShell } from './turn/turn-run-shell.ts'
 import { dualSessionPair, StubSummarySession, type DualSessionPair } from './sessions.ts'
 
 type Phase =
@@ -228,8 +228,8 @@ export class ReactLoopAgent implements Agent {
   lastSteerPreempt: SteerPreemptMeta | null = null
 
   /**
-   * Ideal Topology v1: Orchestrator owns admit/classify + registry + store.
-   * Agent is a thin Cordis host that executes physical cancel / claim / runners.
+   * Ideal Topology v1.1: Orchestrator owns admit/classify + registry + store.
+   * Agent is Cordis host glue — TurnRunShell + ActivationManager are the live path.
    */
   readonly orchestrator: Orchestrator = new Orchestrator({
     checkpointStore: new MemoryCheckpointStore(),
@@ -262,6 +262,21 @@ export class ReactLoopAgent implements Agent {
 
   /** Outer-harness trajectory event bus (tests / tooling). */
   readonly events = new AgentEventBus()
+
+  /**
+   * Live TurnRunShell for the current admitted turn (checkpointChain + settle).
+   * Null between turns; created lazily on first step checkpoint.
+   */
+  private activeTurnShell: TurnRunShell | null = null
+
+  /** Last settled turn shell (tests / trajectory) — proves main path wiring. */
+  lastSettledShell: TurnRunShell | null = null
+
+  /**
+   * Host-parallel façade (start/wait/cancel/degraded). Created lazily;
+   * cancelAll on dispose.
+   */
+  private activationManager: ActivationManager | null = null
 
   /** Dual-session pair (main live; summary stub until wired). */
   get dualSessions(): DualSessionPair {
@@ -341,11 +356,42 @@ export class ReactLoopAgent implements Agent {
     return config?.rpwuSubagentDelivery === 'parent' ? 'parent' : 'caller'
   }
 
+  /** Host ActivationManager (spawn path); never throws on missing seam. */
+  private activations(): ActivationManager {
+    if (!this.activationManager) {
+      this.activationManager = new ActivationManager({
+        ctx: this.loopCtx,
+        parent: this,
+        provider: this.rpwuSubagentProvider(),
+        delivery: this.rpwuSubagentDelivery(),
+      })
+    }
+    return this.activationManager
+  }
+
   /**
-   * In-flight subagent fold controllers keyed by sibling unit id.
-   * Abort on agent dispose; settle path folds into MAIN.
+   * Ensure a TurnRunShell for the active unit + turn index.
+   * Main path: step checkpoints and turn-settle go through this shell.
    */
-  private readonly subagentForkAborts = new Map<string, AbortController>()
+  private ensureTurnShell(turn: number, unit: WorkUnit): TurnRunShell {
+    if (
+      this.activeTurnShell
+      && this.activeTurnShell.turn.turnIndex === turn
+      && this.activeTurnShell.turn.unitId === unit.id
+    ) {
+      return this.activeTurnShell
+    }
+    this.activeTurnShell = new TurnRunShell(
+      {
+        registry: this.workUnits,
+        store: this.checkpointStore,
+        events: this.events,
+      },
+      unit,
+      turn,
+    )
+    return this.activeTurnShell
+  }
 
   /** DeliveryGate (default on when RPWU is on). */
   private deliveryGateEnabled(): boolean {
@@ -423,8 +469,8 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
-   * RPWU: write a step-end checkpoint for the active unit and optionally
-   * inject one DeliveryGate continuation when chat delivery is missing.
+   * RPWU: write a step-end checkpoint via TurnRunShell (live main path) and
+   * optionally inject one DeliveryGate continuation when chat delivery is missing.
    */
   private recordStepCheckpointAndMaybeGate(
     turn: number,
@@ -461,7 +507,8 @@ export class ReactLoopAgent implements Agent {
     // Prefer cumulative cursor when this step had little text but prior had more.
     const priorCursor = unit.checkpoints.at(-1)?.assistantPrefixCursor ?? 0
     const cursor = Math.max(prefix.cursor, priorCursor)
-    const cp = this.orchestrator.recordCheckpoint({
+    const shell = this.ensureTurnShell(turn, unit)
+    const recorded = shell.afterStepCheckpoint({
       unitId: unit.id,
       stepIndex: step,
       turn,
@@ -472,14 +519,7 @@ export class ReactLoopAgent implements Agent {
       delivery: merged,
       reason: 'step-end',
     })
-    this.lastCheckpoint = cp
-    this.events.emit({
-      type: 'checkpoint',
-      unitId: unit.id,
-      stepIndex: step,
-      reason: 'step-end',
-      at: Date.now(),
-    })
+    this.lastCheckpoint = recorded.checkpoint
 
     if (!stepCompleted) return
 
@@ -493,18 +533,18 @@ export class ReactLoopAgent implements Agent {
       this.workUnits.bumpGateRetry(fresh.id)
       this.inbox.splice('next-step', Infinity, 0, [buildDeliveryGateNotice(fresh)])
       this.lastDeliveryGate = buildDeliveryGateMeta(fresh, true)
-      const gateCp = this.workUnits.appendCheckpoint({
+      const gateRecord = shell.afterStepCheckpoint({
         unitId: fresh.id,
         stepIndex: step,
         turn,
         assistantPrefixCursor: cursor,
-        assistantPrefixHash: cp.assistantPrefixHash,
+        assistantPrefixHash: recorded.checkpoint.assistantPrefixHash,
         toolResultRefs: [],
         status: 'running',
         delivery: { ...fresh.delivery },
         reason: 'gate',
       })
-      this.lastCheckpoint = gateCp
+      this.lastCheckpoint = gateRecord.checkpoint
       return
     }
 
@@ -530,8 +570,9 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
-   * Outer harness admission: Orchestrator decides absorb|spawn|cancel;
-   * this Agent only executes physical cancel / claim / SubagentRunner.
+   * Outer harness admission: Orchestrator.admit is the only routing brain
+   * (absorb|spawn|cancel|queue). Agent executes physical cancel / claim /
+   * ActivationManager — never re-implements classify.
    */
   private admit(kind: AdmissionKind, input: UserMessage): void {
     this.ensureCheckpointStore()
@@ -575,16 +616,16 @@ export class ReactLoopAgent implements Agent {
       assistantPrefixCursor: prefix.cursor,
       assistantPrefixHash: prefix.hash,
     })
-    this.events?.emit({
+    this.events.emit({
       type: 'admit',
       action: result.action,
       unitIds: result.unitIds,
       at: Date.now(),
     })
 
-    // True-parallel spawn: host subagent, MAIN keeps flying (no cancel).
+    // True-parallel spawn: ActivationManager owns host start/wait/cancel/degrade.
     if (result.action === 'spawn' && result.useSubagent && result.sibling && result.main) {
-      this.events?.emit({ type: 'spawn', unitId: result.sibling.id, parentId: result.main.id, at: Date.now() })
+      this.events.emit({ type: 'spawn', unitId: result.sibling.id, parentId: result.main.id, at: Date.now() })
       this.lastCheckpoint = result.sibling.checkpoints.at(-1)
         ?? result.main.checkpoints.at(-1)
         ?? null
@@ -610,14 +651,10 @@ export class ReactLoopAgent implements Agent {
           },
         }),
       ])
-      const abort = new AbortController()
-      this.subagentForkAborts.set(result.sibling.id, abort)
-      void this.launchSubagentFork({
+      void this.launchActivationSpawn({
         siblingId: result.sibling.id,
         mainId: result.main.id,
         otherText,
-        subagents: resolveSubagentsRuntime({ ctx: this.loopCtx })!,
-        signal: abort.signal,
       })
       return
     }
@@ -629,7 +666,7 @@ export class ReactLoopAgent implements Agent {
     let unitBlock: string | null = null
     if (boundUnit && result.action === 'spawn' && siblingUnit) {
       unitBlock = buildUnitForkDegradedBlock(boundUnit, siblingUnit)
-      this.events?.emit({
+      this.events.emit({
         type: 'spawn',
         unitId: siblingUnit.id,
         parentId: boundUnit.id,
@@ -638,7 +675,7 @@ export class ReactLoopAgent implements Agent {
       })
     } else if (boundUnit) {
       unitBlock = buildUnitFoldBlock(boundUnit)
-      this.events?.emit({ type: 'absorb', unitId: boundUnit.id, at: Date.now() })
+      this.events.emit({ type: 'absorb', unitId: boundUnit.id, at: Date.now() })
     }
     this.lastCheckpoint = siblingUnit?.checkpoints.at(-1)
       ?? boundUnit?.checkpoints.at(-1)
@@ -660,178 +697,36 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
-   * P1.5: when host `ctx.subagents` is mounted, start OTHER on a child Session
-   * and leave MAIN running. Returns true when the parallel path was taken.
+   * Spawn path via ActivationManager: start → wait → fold.
+   * Missing seam or start failure → visible degrade, never throws.
    */
-  private tryAdmitSubagentFork(input: UserMessage): boolean {
-    // Duck-typed optional host seam — avoid hard-depending on dsh-subagent types.
-    const subagents = resolveSubagentsRuntime({ ctx: this.loopCtx })
-    if (!subagents) return false
-
-    const foldEnabled = this.steerFoldHintEnabled()
-    const mode = foldEnabled ? this.steerFoldMode() : null
-    const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
-    const turn = this.phase.kind === 'running' ? this.phase.turn : 0
-    const step = this.phase.kind === 'running' ? this.phase.step : 0
-    const goalText = resumeAnchor
-      ?? extractLatestHumanUserText(this.session, {
-        excludeText: userMessagePlainText(input),
-      })
-      ?? 'unspecified MAIN'
-    const otherText = userMessagePlainText(input) ?? 'OTHER'
-    const prefix = this.latestAssistantPrefixStats()
-
-    // MAIN stays running — do not cancel the live LLM kick.
-    const boundUnit = this.workUnits.ensureMainUnit({
-      goalSummary: goalText,
-      turn,
-      step,
-      status: 'running',
-    })
-    const mainCp = this.workUnits.appendCheckpoint({
-      unitId: boundUnit.id,
-      stepIndex: step,
-      turn,
-      assistantPrefixCursor: prefix.cursor,
-      assistantPrefixHash: prefix.hash,
-      toolResultRefs: [],
-      status: 'running',
-      delivery: { ...boundUnit.delivery },
-      reason: 'preempt',
-    })
-    this.lastCheckpoint = mainCp
-
-    const siblingUnit = this.workUnits.forkSibling({
-      parentId: boundUnit.id,
-      goalSummary: otherText,
-      lane: 'background',
-      createdAtTurn: turn,
-      createdAtStep: step,
-      status: 'running',
-      bindActive: false,
-      // Parent keeps its live LLM kick; child Session handles OTHER.
-      pauseParent: false,
-    })
-    const siblingCp = this.workUnits.appendCheckpoint({
-      unitId: siblingUnit.id,
-      stepIndex: step,
-      turn,
-      assistantPrefixCursor: 0,
-      assistantPrefixHash: prefix.hash,
-      toolResultRefs: [],
-      status: 'running',
-      delivery: { ...siblingUnit.delivery },
-      reason: 'preempt',
-    })
-    this.lastCheckpoint = siblingCp
-
-    const abort = new AbortController()
-    this.subagentForkAborts.set(siblingUnit.id, abort)
-
-    // Observability notice only — OTHER itself runs on the child, not parent next-step.
-    const noticeText = buildUnitForkBlock(boundUnit, siblingUnit)
-    this.inbox.splice('next-step', Infinity, 0, [
-      createUserMessage({
-        content: [{ type: 'text', text: noticeText }],
-        source: {
-          kind: 'unit-fold-hint',
-          form: 'notice',
-          summary: `Subagent fork: ${siblingUnit.id} under MAIN ${boundUnit.id}`,
-        },
-      }),
-    ])
-
-    this.lastSteerPreempt = buildSteerPreemptMeta({
-      foldInjected: foldEnabled,
-      mode,
-      resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
-      unitId: boundUnit.id,
-      unitFoldPresent: true,
-      otherMode: 'fork',
-      siblingUnitId: siblingUnit.id,
-      forkDegraded: false,
-      childSessionId: null,
-    })
-
-    void this.launchSubagentFork({
-      siblingId: siblingUnit.id,
-      mainId: boundUnit.id,
-      otherText,
-      subagents,
-      signal: abort.signal,
-    })
-
-    return true
-  }
-
-  /** Fire host activation and fold the settled result back into MAIN. */
-  private async launchSubagentFork(options: {
+  private async launchActivationSpawn(options: {
     siblingId: string
     mainId: string
     otherText: string
-    subagents: NonNullable<ReturnType<typeof resolveSubagentsRuntime>>
-    signal: AbortSignal
   }): Promise<void> {
-    try {
-      const started = await startWorkUnitSubagent({
-        subagents: options.subagents,
-        parent: this,
-        promptText: options.otherText,
-        label: summarizeGoal(options.otherText, 48),
-        provider: this.rpwuSubagentProvider(),
-        delivery: this.rpwuSubagentDelivery(),
-        signal: options.signal,
-      })
-      if (options.signal.aborted) {
-        try { await started.activation.dispose() } catch { /* ignore */ }
-        return
-      }
-      this.workUnits.linkChildActivation(options.siblingId, started.activationRef)
-      if (this.lastSteerPreempt?.siblingUnitId === options.siblingId) {
-        this.lastSteerPreempt = {
-          ...this.lastSteerPreempt,
-          childSessionId: started.activationRef.childSessionId,
-          forkDegraded: false,
-        }
-      }
-      // Refresh fork notice text now that childSessionId is known (best-effort).
-      const sibling = this.workUnits.get(options.siblingId)
-      const main = this.workUnits.get(options.mainId)
-      if (sibling && main) {
-        // no-op beyond link — fold-back carries the visible result
-      }
+    const mgr = this.activations()
+    const start = await mgr.start({
+      unitId: options.siblingId,
+      promptText: options.otherText,
+      label: summarizeGoal(options.otherText, 48),
+    })
 
-      let result: SubagentResultLike
-      try {
-        result = await started.activation.result
-      } catch (err) {
-        result = {
-          output: [],
-          stopReason: 'error',
-          diagnostic: err instanceof Error ? err.message : String(err),
-        }
-      }
-      if (options.signal.aborted) return
-      this.foldSubagentSiblingIntoMain(options.siblingId, result)
-    } catch (err) {
-      // Activation failed after we chose the parallel path — mark sibling + notice.
+    if (start.kind === 'degraded') {
       const sibling = this.workUnits.get(options.siblingId)
       const main = this.workUnits.get(options.mainId)
-      if (sibling) {
-        this.workUnits.markStatus(sibling.id, 'cancelled')
-      }
-      const detail = err instanceof Error ? err.message : String(err)
+      if (sibling) this.workUnits.markStatus(sibling.id, 'cancelled')
       if (main && sibling) {
         const text =
           `${buildUnitForkDegradedBlock(main, sibling)} ` +
-          `startActivation failed: ${summarizeGoal(detail, 160)}`
+          `startActivation failed: ${summarizeGoal(start.reason, 160)}`
         this.inbox.splice('next-step', Infinity, 0, [
           createUserMessage({
             content: [{ type: 'text', text }],
             source: {
               kind: 'unit-fold-hint',
               form: 'notice',
-              summary: `Subagent fork failed → degrade notice for ${sibling.id}`,
+              summary: `Subagent spawn degraded for ${sibling.id}`,
             },
           }),
         ])
@@ -845,12 +740,35 @@ export class ReactLoopAgent implements Agent {
           childSessionId: null,
         }
       }
-    } finally {
-      this.subagentForkAborts.delete(options.siblingId)
+      return
     }
+
+    this.workUnits.linkChildActivation(
+      options.siblingId,
+      ActivationManager.refOf(start.started),
+    )
+    if (this.lastSteerPreempt?.siblingUnitId === options.siblingId) {
+      this.lastSteerPreempt = {
+        ...this.lastSteerPreempt,
+        childSessionId: start.started.activationRef.childSessionId,
+        forkDegraded: false,
+      }
+    }
+
+    const waited = await mgr.wait(options.siblingId)
+    if (waited.kind === 'settled') {
+      this.foldSubagentSiblingIntoMain(options.siblingId, waited.result)
+      return
+    }
+    // wait missing/error → fold empty diagnostic result (visible, never throw)
+    this.foldSubagentSiblingIntoMain(options.siblingId, {
+      output: [],
+      stopReason: 'error',
+      diagnostic: waited.reason,
+    })
   }
 
-  /** Map child result → MergeBus.publish + DeliveryGate + settle drain. */
+  /** Map child result → MergeBus.publish + DeliveryGate + TurnRunShell settle. */
   private foldSubagentSiblingIntoMain(siblingId: string, result: SubagentResultLike): void {
     const sibling = this.workUnits.get(siblingId)
     if (!sibling || !sibling.parentId) return
@@ -862,12 +780,10 @@ export class ReactLoopAgent implements Agent {
       mainId: main.id,
       at: Date.now(),
     })
-    settleTurn({
-      registry: this.workUnits,
-      store: this.checkpointStore,
-      unitId: main.id,
-      events: this.events,
-    })
+    const turn = this.phase.kind === 'running' ? this.phase.turn : 0
+    const shell = this.ensureTurnShell(turn, main)
+    this.lastSettledShell = shell
+    shell.settle()
     this.inbox.splice('next-step', Infinity, 0, [notice])
     if (this.phase.kind === 'idle') this.wakeDriver(false)
     else this.phase.wakeRequested = true
@@ -879,12 +795,9 @@ export class ReactLoopAgent implements Agent {
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
     }
     if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
-    // Drop in-flight P1.5 child activations when the parent is disposed.
+    // Drop in-flight host activations when the parent is disposed.
     if (cause.kind === 'disposed') {
-      for (const [id, abort] of this.subagentForkAborts) {
-        abort.abort()
-        this.subagentForkAborts.delete(id)
-      }
+      this.activationManager?.cancelAll()
     }
   }
 
@@ -1095,6 +1008,12 @@ export class ReactLoopAgent implements Agent {
         this.session.append('turn/end', { turn, reason: turnEnds! })
       } catch (error: unknown) {
         this.throwError(error)
+      }
+      // Outer harness turn-settle: drain checkpointChain via TurnRunShell.
+      if (this.activeTurnShell?.turn.turnIndex === turn) {
+        this.lastSettledShell = this.activeTurnShell
+        this.activeTurnShell.settle()
+        this.activeTurnShell = null
       }
     }
     if (!this.inbox.hasPending) return false

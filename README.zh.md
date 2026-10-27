@@ -71,18 +71,21 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - `rpwuCheckpointStore`（默认 `memory`）— `file` 启用文件骨架
 - `deliveryGate` / `deliveryGateMaxRetries` — 同前
 
-### 理想拓扑（0.2.0）
+### 理想拓扑（0.2.1 — 主路径已挂）
 
 ```
-用户/插话 → Orchestrator（absorb|spawn|cancel|queue）
-              → WorkUnit + TurnRunShell / ActivationManager
+用户/插话 → Orchestrator.admit（absorb|spawn|cancel|queue）
+              → TurnRunShell（checkpointChain + turn-settle）     ← 实路径
+              → ActivationManager（start/wait/cancel/degrade）  ← spawn 实路径
               → CheckpointStore（DurableWorkflow seam）
               → MergeBus + DeliveryGate → 主对话
 ```
 
-**Outer** = 本插件；**Inner** = dsh ReAct；真并行 = 宿主 subagent。契约：[`docs/ideal-topology.md`](./docs/ideal-topology.md)。
+**0.2.1：** Agent 收薄为 Cordis 宿主胶水；admitted turn 走 **TurnRunShell**；spawn/宿主并行走 **ActivationManager**（无 seam → 可见 degrade，不抛）。Orchestrator 仍是唯一 admit 路由脑。契约：[`docs/ideal-topology.md`](./docs/ideal-topology.md)。
 
-**相对 0.1.9 破坏性：** 默认 `fold`→`spawn`；包布局拆分（根入口仍 re-export）。打断 ⊥ 耐久分测。
+**Outer** = 本插件；**Inner** = dsh ReAct；真并行 = 宿主 subagent。
+
+**相对 0.1.9 破坏性（自 0.2.0）：** 默认 `fold`→`spawn`；包布局拆分（根入口仍 re-export）。打断 ⊥ 耐久分测。
 
 ### 0.1.9 改动摘要
 

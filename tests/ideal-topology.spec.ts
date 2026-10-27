@@ -185,6 +185,53 @@ describe('Ideal Topology v1.1 — runners / ActivationManager / TurnRunShell', (
     expect(mgr.available).toBe(false)
   })
 
+  it('ActivationManager.start without seam → degraded, never throws', async () => {
+    const mgr = new ActivationManager({
+      ctx: {},
+      parent: {} as never,
+    })
+    const result = await mgr.start({ unitId: 'wu-x', promptText: 'OTHER' })
+    expect(result.kind).toBe('degraded')
+    if (result.kind === 'degraded') {
+      expect(result.reason).toMatch(/unavailable/i)
+    }
+  })
+
+  it('ActivationManager.start + wait with mock seam', async () => {
+    const startActivation = async () => ({
+      childId: 'child-am-1',
+      result: Promise.resolve({
+        output: [{ type: 'text' as const, text: 'done' }],
+        stopReason: 'completed',
+      }),
+      dispose: async () => {},
+    })
+    const mgr = new ActivationManager({
+      ctx: { subagents: { startActivation } },
+      parent: {} as never,
+      provider: 'spawn',
+    })
+    expect(mgr.available).toBe(true)
+    const started = await mgr.start({ unitId: 'wu-sib', promptText: 'pack' })
+    expect(started.kind).toBe('started')
+    if (started.kind !== 'started') return
+    expect(ActivationManager.refOf(started.started).childSessionId).toBe('child-am-1')
+    const waited = await mgr.wait('wu-sib')
+    expect(waited.kind).toBe('settled')
+    if (waited.kind === 'settled') {
+      expect(waited.result.stopReason).toBe('completed')
+    }
+  })
+
+  it('ActivationManager.wait missing → never throws', async () => {
+    const mgr = new ActivationManager({
+      ctx: {},
+      parent: {} as never,
+    })
+    const waited = await mgr.wait('no-such')
+    expect(waited.kind).toBe('missing')
+  })
+
   it('TurnRunShell afterStepCheckpoint + settle drain', () => {
     const store = new MemoryCheckpointStore()
     const reg = new WorkUnitRegistry()
@@ -205,10 +252,14 @@ describe('Ideal Topology v1.1 — runners / ActivationManager / TurnRunShell', (
     const chain = shell.checkpointChain()
     expect(chain.checkpoints).toHaveLength(1)
     expect(checkpointChain(reg.get(unit.id)!).checkpoints).toHaveLength(1)
+    expect(store.list(unit.id)).toHaveLength(1)
+    expect(store.exportSnapshot().activeId).toBe(unit.id)
     const settled = shell.settle()
     expect(settled.flushedCheckpoints).toBeGreaterThan(0)
     expect(events.history.some(e => e.type === 'checkpoint')).toBe(true)
     expect(events.history.some(e => e.type === 'settle')).toBe(true)
+    // settle is idempotent
+    expect(shell.settle().flushedCheckpoints).toBe(settled.flushedCheckpoints)
   })
 })
 

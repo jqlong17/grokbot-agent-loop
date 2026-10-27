@@ -1,5 +1,6 @@
 /**
  * TurnRunShell — stitches inner loop steps for one admitted turn (v1.1).
+ * Live main path for admit → inner steps → checkpointChain → turn-settle.
  * @module @harness-plugins/grokbot-agent-loop/turn/turn-run-shell
  */
 import type { CheckpointStore } from '../checkpoint/store.ts';
@@ -19,13 +20,16 @@ export interface TurnRunShellOptions {
 export declare class TurnRunShell {
     private readonly options;
     private readonly steps;
+    private settled;
     readonly turn: Turn;
     constructor(options: TurnRunShellOptions, unit: WorkUnit, turnIndex: number);
     /** Record checkpoint after an inner step; sync to store + event bus. */
-    afterStepCheckpoint(cp: StepCheckpoint): AfterStepCheckpoint;
+    afterStepCheckpoint(cp: Omit<StepCheckpoint, 'at'> & {
+        at?: number;
+    }): AfterStepCheckpoint;
     /** Ordered checkpoint chain for this turn's unit. */
     checkpointChain(): CheckpointChain;
-    /** Drain checkpoints then produce transcript hint (turn-settle). */
+    /** Drain checkpoints then produce transcript hint (turn-settle). Idempotent. */
     settle(): TurnSettleResult;
 }
 //# sourceMappingURL=turn-run-shell.d.ts.map

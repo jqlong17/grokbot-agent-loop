@@ -26,7 +26,7 @@ export { MemoryDurableWorkflow, FileDurableWorkflow, createDurableWorkflow, type
 export { MergeBus, type MergePacket, type MergePublishResult } from './merge/index.ts';
 export { DeliveryGate } from './delivery/index.ts';
 export { InProcessRunner, SubagentRunner, type UnitRunner, type UnitStepResult, } from './unit/runner.ts';
-export { ActivationManager, type ActivationStartResult } from './unit/activation-manager.ts';
+export { ActivationManager, type ActivationStartResult, type ActivationWaitResult, } from './unit/activation-manager.ts';
 export { createWorkId, createInputRecord, type WorkId, type InputId, type InputRecord, } from './unit/input-record.ts';
 export { TurnRunShell } from './turn/turn-run-shell.ts';
 export { settleTurn, type TurnSettleResult } from './turn/settle.ts';
