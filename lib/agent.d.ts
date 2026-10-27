@@ -16,6 +16,7 @@ import { Orchestrator } from './orchestrator/orchestrator.ts';
 import { MergeBus } from './merge/bus.ts';
 import type { CheckpointStore } from './checkpoint/store.ts';
 import { AgentEventBus } from './events.ts';
+import { TurnRunShell } from './turn/turn-run-shell.ts';
 import { type DualSessionPair } from './sessions.ts';
 /** Drives one session through turn and step boundaries. */
 export declare class ReactLoopAgent implements Agent {
@@ -63,8 +64,8 @@ export declare class ReactLoopAgent implements Agent {
      */
     lastSteerPreempt: SteerPreemptMeta | null;
     /**
-     * Ideal Topology v1: Orchestrator owns admit/classify + registry + store.
-     * Agent is a thin Cordis host that executes physical cancel / claim / runners.
+     * Ideal Topology v1.1: Orchestrator owns admit/classify + registry + store.
+     * Agent is Cordis host glue — TurnRunShell + ActivationManager are the live path.
      */
     readonly orchestrator: Orchestrator;
     /** Session-local WorkUnit registry (owned by Orchestrator). */
@@ -81,6 +82,18 @@ export declare class ReactLoopAgent implements Agent {
     private checkpointStoreConfigured;
     /** Outer-harness trajectory event bus (tests / tooling). */
     readonly events: AgentEventBus;
+    /**
+     * Live TurnRunShell for the current admitted turn (checkpointChain + settle).
+     * Null between turns; created lazily on first step checkpoint.
+     */
+    private activeTurnShell;
+    /** Last settled turn shell (tests / trajectory) — proves main path wiring. */
+    lastSettledShell: TurnRunShell | null;
+    /**
+     * Host-parallel façade (start/wait/cancel/degraded). Created lazily;
+     * cancelAll on dispose.
+     */
+    private activationManager;
     /** Dual-session pair (main live; summary stub until wired). */
     get dualSessions(): DualSessionPair;
     /** Whether interruptible busy-steer is enabled on the mounted loop config. */
@@ -104,11 +117,13 @@ export declare class ReactLoopAgent implements Agent {
     private rpwuSubagentProvider;
     /** P1.5: activation delivery policy (default `caller` so we fold ourselves). */
     private rpwuSubagentDelivery;
+    /** Host ActivationManager (spawn path); never throws on missing seam. */
+    private activations;
     /**
-     * In-flight subagent fold controllers keyed by sibling unit id.
-     * Abort on agent dispose; settle path folds into MAIN.
+     * Ensure a TurnRunShell for the active unit + turn index.
+     * Main path: step checkpoints and turn-settle go through this shell.
      */
-    private readonly subagentForkAborts;
+    private ensureTurnShell;
     /** DeliveryGate (default on when RPWU is on). */
     private deliveryGateEnabled;
     /** Max DeliveryGate continuation injections per unit (default 2). */
@@ -125,25 +140,24 @@ export declare class ReactLoopAgent implements Agent {
     /** Collect recent tool result refs from the current step window (best-effort). */
     private recentToolResultRefs;
     /**
-     * RPWU: write a step-end checkpoint for the active unit and optionally
-     * inject one DeliveryGate continuation when chat delivery is missing.
+     * RPWU: write a step-end checkpoint via TurnRunShell (live main path) and
+     * optionally inject one DeliveryGate continuation when chat delivery is missing.
      */
     private recordStepCheckpointAndMaybeGate;
     /** Snapshot used by the pure dual-lane scheduler. */
     private schedulerState;
     /**
-     * Outer harness admission: Orchestrator decides absorb|spawn|cancel;
-     * this Agent only executes physical cancel / claim / SubagentRunner.
+     * Outer harness admission: Orchestrator.admit is the only routing brain
+     * (absorb|spawn|cancel|queue). Agent executes physical cancel / claim /
+     * ActivationManager — never re-implements classify.
      */
     private admit;
     /**
-     * P1.5: when host `ctx.subagents` is mounted, start OTHER on a child Session
-     * and leave MAIN running. Returns true when the parallel path was taken.
+     * Spawn path via ActivationManager: start → wait → fold.
+     * Missing seam or start failure → visible degrade, never throws.
      */
-    private tryAdmitSubagentFork;
-    /** Fire host activation and fold the settled result back into MAIN. */
-    private launchSubagentFork;
-    /** Map child result → MergeBus.publish + DeliveryGate + settle drain. */
+    private launchActivationSpawn;
+    /** Map child result → MergeBus.publish + DeliveryGate + TurnRunShell settle. */
     private foldSubagentSiblingIntoMain;
     cancel(cause: AgentCancelCause, options?: CancelOptions): void;
     runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T>;

@@ -172,7 +172,11 @@ export {
   type UnitRunner,
   type UnitStepResult,
 } from './unit/runner.ts'
-export { ActivationManager, type ActivationStartResult } from './unit/activation-manager.ts'
+export {
+  ActivationManager,
+  type ActivationStartResult,
+  type ActivationWaitResult,
+} from './unit/activation-manager.ts'
 export {
   createWorkId,
   createInputRecord,

@@ -2,6 +2,8 @@
  * ActivationManager — host subagent façade (Ideal Topology v1.1).
  * Wraps startWorkUnitSubagent; missing seam → degraded, never throws.
  *
+ * Live main path for spawn / host parallel: start → wait → cancel / degrade.
+ *
  * @module @harness-plugins/grokbot-agent-loop/unit/activation-manager
  */
 
@@ -10,6 +12,7 @@ import {
   resolveSubagentsRuntime,
   startWorkUnitSubagent,
   type StartedWorkUnitSubagent,
+  type SubagentResultLike,
   type SubagentsRuntimeLike,
 } from './subagent.ts'
 import type { WorkUnitActivationRef } from './work-unit.ts'
@@ -17,6 +20,11 @@ import type { WorkUnitActivationRef } from './work-unit.ts'
 export type ActivationStartResult =
   | { kind: 'started'; started: StartedWorkUnitSubagent }
   | { kind: 'degraded'; reason: string }
+
+export type ActivationWaitResult =
+  | { kind: 'settled'; result: SubagentResultLike }
+  | { kind: 'missing'; reason: string }
+  | { kind: 'error'; reason: string }
 
 export interface ActivationManagerOptions {
   readonly ctx: {
@@ -31,6 +39,7 @@ export interface ActivationManagerOptions {
 /** Unified façade over host startActivation / wait / cancel / degrade. */
 export class ActivationManager {
   private readonly aborts = new Map<string, AbortController>()
+  private readonly started = new Map<string, StartedWorkUnitSubagent>()
 
   constructor(private readonly options: ActivationManagerOptions) {}
 
@@ -63,8 +72,10 @@ export class ActivationManager {
         delivery: this.options.delivery,
         signal: abort.signal,
       })
+      this.started.set(options.unitId, started)
       return { kind: 'started', started }
     } catch (err) {
+      this.aborts.delete(options.unitId)
       return {
         kind: 'degraded',
         reason: err instanceof Error ? err.message : String(err),
@@ -74,18 +85,42 @@ export class ActivationManager {
     }
   }
 
+  /** Await a previously started activation result (never throws). */
+  async wait(unitId: string): Promise<ActivationWaitResult> {
+    const handle = this.started.get(unitId)
+    if (!handle) {
+      return { kind: 'missing', reason: `no started activation for ${unitId}` }
+    }
+    try {
+      const result = await handle.activation.result
+      return { kind: 'settled', result }
+    } catch (err) {
+      return {
+        kind: 'error',
+        reason: err instanceof Error ? err.message : String(err),
+      }
+    } finally {
+      this.started.delete(unitId)
+      this.aborts.delete(unitId)
+    }
+  }
+
   cancel(unitId: string): void {
     const abort = this.aborts.get(unitId)
     if (abort) {
       abort.abort()
       this.aborts.delete(unitId)
     }
+    const handle = this.started.get(unitId)
+    if (handle) {
+      void handle.activation.dispose().catch(() => { /* ignore */ })
+      this.started.delete(unitId)
+    }
   }
 
   cancelAll(): void {
-    for (const [id, abort] of this.aborts) {
-      abort.abort()
-      this.aborts.delete(id)
+    for (const id of [...this.aborts.keys(), ...this.started.keys()]) {
+      this.cancel(id)
     }
   }
 

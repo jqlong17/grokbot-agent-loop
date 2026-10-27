@@ -2,16 +2,28 @@
  * ActivationManager — host subagent façade (Ideal Topology v1.1).
  * Wraps startWorkUnitSubagent; missing seam → degraded, never throws.
  *
+ * Live main path for spawn / host parallel: start → wait → cancel / degrade.
+ *
  * @module @harness-plugins/grokbot-agent-loop/unit/activation-manager
  */
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import { type StartedWorkUnitSubagent, type SubagentsRuntimeLike } from './subagent.ts';
+import { type StartedWorkUnitSubagent, type SubagentResultLike, type SubagentsRuntimeLike } from './subagent.ts';
 import type { WorkUnitActivationRef } from './work-unit.ts';
 export type ActivationStartResult = {
     kind: 'started';
     started: StartedWorkUnitSubagent;
 } | {
     kind: 'degraded';
+    reason: string;
+};
+export type ActivationWaitResult = {
+    kind: 'settled';
+    result: SubagentResultLike;
+} | {
+    kind: 'missing';
+    reason: string;
+} | {
+    kind: 'error';
     reason: string;
 };
 export interface ActivationManagerOptions {
@@ -27,6 +39,7 @@ export interface ActivationManagerOptions {
 export declare class ActivationManager {
     private readonly options;
     private readonly aborts;
+    private readonly started;
     constructor(options: ActivationManagerOptions);
     /** True when host seam exposes startActivation. */
     get available(): boolean;
@@ -36,6 +49,8 @@ export declare class ActivationManager {
         label?: string;
         signal?: AbortSignal;
     }): Promise<ActivationStartResult>;
+    /** Await a previously started activation result (never throws). */
+    wait(unitId: string): Promise<ActivationWaitResult>;
     cancel(unitId: string): void;
     cancelAll(): void;
     static refOf(started: StartedWorkUnitSubagent): WorkUnitActivationRef;

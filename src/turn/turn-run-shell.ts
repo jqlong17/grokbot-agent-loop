@@ -1,5 +1,6 @@
 /**
  * TurnRunShell — stitches inner loop steps for one admitted turn (v1.1).
+ * Live main path for admit → inner steps → checkpointChain → turn-settle.
  * @module @harness-plugins/grokbot-agent-loop/turn/turn-run-shell
  */
 
@@ -27,6 +28,7 @@ export interface TurnRunShellOptions {
  */
 export class TurnRunShell {
   private readonly steps: AfterStepCheckpoint[] = []
+  private settled = false
   readonly turn: Turn
 
   constructor(
@@ -42,7 +44,9 @@ export class TurnRunShell {
   }
 
   /** Record checkpoint after an inner step; sync to store + event bus. */
-  afterStepCheckpoint(cp: StepCheckpoint): AfterStepCheckpoint {
+  afterStepCheckpoint(
+    cp: Omit<StepCheckpoint, 'at'> & { at?: number },
+  ): AfterStepCheckpoint {
     const step: Step = {
       turnIndex: this.turn.turnIndex,
       stepIndex: cp.stepIndex,
@@ -52,6 +56,7 @@ export class TurnRunShell {
     this.options.store.put(full)
     const unit = this.options.registry.get(cp.unitId)
     if (unit) this.options.store.saveUnit(unit)
+    this.options.store.setActiveId(this.options.registry.active()?.id ?? cp.unitId)
     const record: AfterStepCheckpoint = {
       checkpoint: full,
       turn: this.turn,
@@ -76,8 +81,19 @@ export class TurnRunShell {
       : { unitId: this.turn.unitId, checkpoints: this.steps.map(s => s.checkpoint) }
   }
 
-  /** Drain checkpoints then produce transcript hint (turn-settle). */
+  /** Drain checkpoints then produce transcript hint (turn-settle). Idempotent. */
   settle(): TurnSettleResult {
+    if (this.settled) {
+      const unit = this.options.registry.get(this.turn.unitId)
+      return {
+        unitId: this.turn.unitId,
+        flushedCheckpoints: unit?.checkpoints.length ?? this.steps.length,
+        transcriptHint: unit
+          ? `unit=${unit.id}; goal=${unit.goalSummary}; checkpoints=${unit.checkpoints.length}; status=${unit.status}`
+          : '',
+      }
+    }
+    this.settled = true
     return settleTurn({
       registry: this.options.registry,
       store: this.options.store,
@@ -86,3 +102,4 @@ export class TurnRunShell {
     })
   }
 }
+

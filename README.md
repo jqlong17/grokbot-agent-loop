@@ -89,18 +89,21 @@ Config flags:
 - `rpwuCheckpointStore` (default `memory`) — `file` enables FileCheckpointStore skeleton
 - `deliveryGate` / `deliveryGateMaxRetries` — unchanged
 
-### Ideal Topology (0.2.0)
+### Ideal Topology (0.2.1 — main path wired)
 
 ```
-User/steer → Orchestrator (absorb|spawn|cancel|queue)
-                → WorkUnits + TurnRunShell / ActivationManager
+User/steer → Orchestrator.admit (absorb|spawn|cancel|queue)
+                → TurnRunShell (checkpointChain + turn-settle)   ← live
+                → ActivationManager (start/wait/cancel/degrade) ← live spawn
                 → CheckpointStore (DurableWorkflow seam)
                 → MergeBus + DeliveryGate → MAIN chat
 ```
 
-**Outer** = this plugin (admit, durability, merge, gate, AgentEvent). **Inner** = dsh ReAct. True parallel = host subagent. Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md).
+**0.2.1:** Agent is Cordis host glue; admitted turns run through **TurnRunShell**; spawn/host parallel through **ActivationManager** (missing seam → visible degrade, never throws). Orchestrator remains the only admit brain. Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md).
 
-**Breaking vs 0.1.9:** default `rpwuOtherMode` `fold` → `spawn`; package layout split under `orchestrator/` `unit/` `checkpoint/` `merge/` `delivery/` (root re-exports kept). Interruptible ⊥ Durable tested separately.
+**Outer** = this plugin (admit, durability, merge, gate, AgentEvent). **Inner** = dsh ReAct. True parallel = host subagent.
+
+**Breaking vs 0.1.9 (from 0.2.0):** default `rpwuOtherMode` `fold` → `spawn`; package layout split under `orchestrator/` `unit/` `checkpoint/` `merge/` `delivery/` (root re-exports kept). Interruptible ⊥ Durable tested separately.
 
 ### 0.1.9 notes
 
