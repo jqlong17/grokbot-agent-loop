@@ -79,7 +79,12 @@ import { MemoryCheckpointStore, FileCheckpointStore } from './checkpoint/index.t
 import type { CheckpointStore } from './checkpoint/store.ts'
 import { AgentEventBus } from './events.ts'
 import { TurnRunShell } from './turn/turn-run-shell.ts'
-import { dualSessionPair, StubSummarySession, type DualSessionPair } from './sessions.ts'
+import {
+  dualSessionPair,
+  MemorySummarySession,
+  type DualSessionPair,
+  type SummarySession,
+} from './sessions.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -278,9 +283,23 @@ export class ReactLoopAgent implements Agent {
    */
   private activationManager: ActivationManager | null = null
 
-  /** Dual-session pair (main live; summary stub until wired). */
+  /**
+   * SummarySession carrier (0.2.3 MemorySummarySession).
+   * Injects user-role carrier into MAIN — no second product UI.
+   * Lazy: constructor param `id` is not yet assigned during field init.
+   */
+  private _summarySession: MemorySummarySession | null = null
+
+  get summarySession(): SummarySession {
+    if (!this._summarySession) {
+      this._summarySession = new MemorySummarySession(`${this.id}:summary`)
+    }
+    return this._summarySession
+  }
+
+  /** Dual-session pair (main live + summary carrier). */
   get dualSessions(): DualSessionPair {
-    return dualSessionPair(this.id, new StubSummarySession(`${this.id}:summary`))
+    return dualSessionPair(this.id, this.summarySession)
   }
 
   /** Whether interruptible busy-steer is enabled on the mounted loop config. */

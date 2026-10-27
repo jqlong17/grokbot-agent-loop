@@ -18,7 +18,7 @@ import { MergeBus } from './merge/bus.ts';
 import type { CheckpointStore } from './checkpoint/store.ts';
 import { AgentEventBus } from './events.ts';
 import { TurnRunShell } from './turn/turn-run-shell.ts';
-import { type DualSessionPair } from './sessions.ts';
+import { type DualSessionPair, type SummarySession } from './sessions.ts';
 /** Drives one session through turn and step boundaries. */
 export declare class ReactLoopAgent implements Agent {
     private loopCtx;
@@ -95,7 +95,14 @@ export declare class ReactLoopAgent implements Agent {
      * cancelAll on dispose.
      */
     private activationManager;
-    /** Dual-session pair (main live; summary stub until wired). */
+    /**
+     * SummarySession carrier (0.2.3 MemorySummarySession).
+     * Injects user-role carrier into MAIN — no second product UI.
+     * Lazy: constructor param `id` is not yet assigned during field init.
+     */
+    private _summarySession;
+    get summarySession(): SummarySession;
+    /** Dual-session pair (main live + summary carrier). */
     get dualSessions(): DualSessionPair;
     /** Whether interruptible busy-steer is enabled on the mounted loop config. */
     private interruptOnSteerEnabled;
