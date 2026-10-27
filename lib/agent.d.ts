@@ -11,7 +11,12 @@ import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { ReactLoopInbox } from './inbox.ts';
 import { type SteerPreemptMeta } from './steer-fold.ts';
-import { WorkUnitRegistry, type DeliveryGateMeta, type StepCheckpoint } from './work-unit.ts';
+import { type DeliveryGateMeta, type StepCheckpoint } from './unit/work-unit.ts';
+import { Orchestrator } from './orchestrator/orchestrator.ts';
+import { MergeBus } from './merge/bus.ts';
+import type { CheckpointStore } from './checkpoint/store.ts';
+import { AgentEventBus } from './events.ts';
+import { type DualSessionPair } from './sessions.ts';
 /** Drives one session through turn and step boundaries. */
 export declare class ReactLoopAgent implements Agent {
     private loopCtx;
@@ -58,14 +63,26 @@ export declare class ReactLoopAgent implements Agent {
      */
     lastSteerPreempt: SteerPreemptMeta | null;
     /**
-     * RPWU P0: session-local WorkUnit registry (Agent lifetime, in-memory).
-     * Always allocated; disabled via config simply skips mutations beyond no-ops.
+     * Ideal Topology v1: Orchestrator owns admit/classify + registry + store.
+     * Agent is a thin Cordis host that executes physical cancel / claim / runners.
      */
-    readonly workUnits: WorkUnitRegistry;
+    readonly orchestrator: Orchestrator;
+    /** Session-local WorkUnit registry (owned by Orchestrator). */
+    get workUnits(): import("./unit/work-unit.ts").WorkUnitRegistry;
+    /** CheckpointStore (default memory; file when configured). */
+    get checkpointStore(): CheckpointStore;
+    /** MergeBus for fold-back + peer handoff. */
+    get mergeBus(): MergeBus;
     /** Last step checkpoint written (tests / trajectory). */
     lastCheckpoint: StepCheckpoint | null;
     /** Last DeliveryGate injection meta (tests / trajectory). */
     lastDeliveryGate: DeliveryGateMeta | null;
+    /** Whether Orchestrator store was rebound from loop config (once). */
+    private checkpointStoreConfigured;
+    /** Outer-harness trajectory event bus (tests / tooling). */
+    readonly events: AgentEventBus;
+    /** Dual-session pair (main live; summary stub until wired). */
+    get dualSessions(): DualSessionPair;
     /** Whether interruptible busy-steer is enabled on the mounted loop config. */
     private interruptOnSteerEnabled;
     /** Whether to inject the continue-prior fold notice after a preempting steer. */
@@ -77,11 +94,12 @@ export declare class ReactLoopAgent implements Agent {
     /** RPWU P0 master switch (default on). When false, behavior ≈0.1.5. */
     private rpwuEnabled;
     /**
-     * RPWU P1-a / P1.5: how OTHER joins the registry on preempt.
-     * Default `fold` preserves 0.1.7 short-protocol behavior.
-     * `fork` / `subagent` try host startActivation (degrade if missing).
+     * Ideal Topology: how OTHER joins on preempt.
+     * Default `spawn` (0.2.0); `fold` is explicit compat.
      */
     private rpwuOtherMode;
+    /** Ensure CheckpointStore matches loop config (memory default / file skeleton). */
+    private ensureCheckpointStore;
     /** P1.5: host provider name for fork activations (default `spawn`). */
     private rpwuSubagentProvider;
     /** P1.5: activation delivery policy (default `caller` so we fold ourselves). */
@@ -114,12 +132,8 @@ export declare class ReactLoopAgent implements Agent {
     /** Snapshot used by the pure dual-lane scheduler. */
     private schedulerState;
     /**
-     * Apply {@link decideAdmission} and execute cancel-then-claim when required.
-     * Stock `send()` remains available for callers that need the legacy remap.
-     *
-     * P1.5: when `rpwuOtherMode` is fork/subagent and host `ctx.subagents` is
-     * present, OTHER starts a child Session via `startActivation` while MAIN
-     * keeps running (no cancel). Missing seam → 0.1.8 registry fork + degrade notice.
+     * Outer harness admission: Orchestrator decides absorb|spawn|cancel;
+     * this Agent only executes physical cancel / claim / SubagentRunner.
      */
     private admit;
     /**
@@ -129,7 +143,7 @@ export declare class ReactLoopAgent implements Agent {
     private tryAdmitSubagentFork;
     /** Fire host activation and fold the settled result back into MAIN. */
     private launchSubagentFork;
-    /** Map child result → peer packet → foldSiblingIntoMain + inbox notice. */
+    /** Map child result → MergeBus.publish + DeliveryGate + settle drain. */
     private foldSubagentSiblingIntoMain;
     cancel(cause: AgentCancelCause, options?: CancelOptions): void;
     runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T>;

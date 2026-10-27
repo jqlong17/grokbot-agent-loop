@@ -52,7 +52,6 @@ import {
   type SteerPreemptMeta,
 } from './steer-fold.ts'
 import {
-  WorkUnitRegistry,
   assistantPrefixStats,
   buildDeliveryGateMeta,
   buildDeliveryGateNotice,
@@ -67,13 +66,20 @@ import {
   type RpwuOtherMode,
   type StepCheckpoint,
   type WorkUnit,
-} from './work-unit.ts'
+} from './unit/work-unit.ts'
 import {
   peerPacketFromSubagentResult,
   resolveSubagentsRuntime,
   startWorkUnitSubagent,
   type SubagentResultLike,
-} from './work-unit-subagent.ts'
+} from './unit/subagent.ts'
+import { Orchestrator } from './orchestrator/orchestrator.ts'
+import { MergeBus } from './merge/bus.ts'
+import { MemoryCheckpointStore, FileCheckpointStore } from './checkpoint/index.ts'
+import type { CheckpointStore } from './checkpoint/store.ts'
+import { AgentEventBus } from './events.ts'
+import { settleTurn } from './settle.ts'
+import { dualSessionPair, StubSummarySession, type DualSessionPair } from './sessions.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -222,16 +228,45 @@ export class ReactLoopAgent implements Agent {
   lastSteerPreempt: SteerPreemptMeta | null = null
 
   /**
-   * RPWU P0: session-local WorkUnit registry (Agent lifetime, in-memory).
-   * Always allocated; disabled via config simply skips mutations beyond no-ops.
+   * Ideal Topology v1: Orchestrator owns admit/classify + registry + store.
+   * Agent is a thin Cordis host that executes physical cancel / claim / runners.
    */
-  readonly workUnits = new WorkUnitRegistry()
+  readonly orchestrator: Orchestrator = new Orchestrator({
+    checkpointStore: new MemoryCheckpointStore(),
+    defaultOtherMode: 'spawn',
+  })
+
+  /** Session-local WorkUnit registry (owned by Orchestrator). */
+  get workUnits() {
+    return this.orchestrator.registry
+  }
+
+  /** CheckpointStore (default memory; file when configured). */
+  get checkpointStore(): CheckpointStore {
+    return this.orchestrator.checkpointStore
+  }
+
+  /** MergeBus for fold-back + peer handoff. */
+  get mergeBus(): MergeBus {
+    return this.orchestrator.mergeBus
+  }
 
   /** Last step checkpoint written (tests / trajectory). */
   lastCheckpoint: StepCheckpoint | null = null
 
   /** Last DeliveryGate injection meta (tests / trajectory). */
   lastDeliveryGate: DeliveryGateMeta | null = null
+
+  /** Whether Orchestrator store was rebound from loop config (once). */
+  private checkpointStoreConfigured = false
+
+  /** Outer-harness trajectory event bus (tests / tooling). */
+  readonly events = new AgentEventBus()
+
+  /** Dual-session pair (main live; summary stub until wired). */
+  get dualSessions(): DualSessionPair {
+    return dualSessionPair(this.id, new StubSummarySession(`${this.id}:summary`))
+  }
 
   /** Whether interruptible busy-steer is enabled on the mounted loop config. */
   private interruptOnSteerEnabled(): boolean {
@@ -268,13 +303,29 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
-   * RPWU P1-a / P1.5: how OTHER joins the registry on preempt.
-   * Default `fold` preserves 0.1.7 short-protocol behavior.
-   * `fork` / `subagent` try host startActivation (degrade if missing).
+   * Ideal Topology: how OTHER joins on preempt.
+   * Default `spawn` (0.2.0); `fold` is explicit compat.
    */
-  private rpwuOtherMode(): 'fold' | 'fork' {
+  private rpwuOtherMode(): 'fold' | 'spawn' {
     const config = this.loopCtx.agentLoop?.config as { rpwuOtherMode?: RpwuOtherMode } | undefined
-    return normalizeRpwuOtherMode(config?.rpwuOtherMode)
+    return normalizeRpwuOtherMode(config?.rpwuOtherMode ?? 'spawn')
+  }
+
+  /** Ensure CheckpointStore matches loop config (memory default / file skeleton). */
+  private ensureCheckpointStore(): void {
+    if (this.checkpointStoreConfigured) return
+    this.checkpointStoreConfigured = true
+    const config = this.loopCtx.agentLoop?.config as {
+      rpwuCheckpointStore?: 'memory' | 'file'
+      rpwuCheckpointPath?: string
+    } | undefined
+    if (config?.rpwuCheckpointStore === 'file') {
+      const path = config.rpwuCheckpointPath?.trim() || `/tmp/grokbot-checkpoints/${this.id}.json`
+      const store = new FileCheckpointStore({ path })
+      // Rebind orchestrator store by hydrating into the same registry.
+      ;(this.orchestrator as { checkpointStore: CheckpointStore }).checkpointStore = store
+      store.hydrate(this.workUnits)
+    }
   }
 
   /** P1.5: host provider name for fork activations (default `spawn`). */
@@ -410,7 +461,7 @@ export class ReactLoopAgent implements Agent {
     // Prefer cumulative cursor when this step had little text but prior had more.
     const priorCursor = unit.checkpoints.at(-1)?.assistantPrefixCursor ?? 0
     const cursor = Math.max(prefix.cursor, priorCursor)
-    const cp = this.workUnits.appendCheckpoint({
+    const cp = this.orchestrator.recordCheckpoint({
       unitId: unit.id,
       stepIndex: step,
       turn,
@@ -422,6 +473,13 @@ export class ReactLoopAgent implements Agent {
       reason: 'step-end',
     })
     this.lastCheckpoint = cp
+    this.events.emit({
+      type: 'checkpoint',
+      unitId: unit.id,
+      stepIndex: step,
+      reason: 'step-end',
+      at: Date.now(),
+    })
 
     if (!stepCompleted) return
 
@@ -472,127 +530,133 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
-   * Apply {@link decideAdmission} and execute cancel-then-claim when required.
-   * Stock `send()` remains available for callers that need the legacy remap.
-   *
-   * P1.5: when `rpwuOtherMode` is fork/subagent and host `ctx.subagents` is
-   * present, OTHER starts a child Session via `startActivation` while MAIN
-   * keeps running (no cancel). Missing seam → 0.1.8 registry fork + degrade notice.
+   * Outer harness admission: Orchestrator decides absorb|spawn|cancel;
+   * this Agent only executes physical cancel / claim / SubagentRunner.
    */
   private admit(kind: AdmissionKind, input: UserMessage): void {
-    const decision = decideAdmission(kind, this.schedulerState())
+    this.ensureCheckpointStore()
+    const scheduler = this.schedulerState()
+    const decision = decideAdmission(kind, scheduler)
 
-    if (decision.preempt) {
-      // P1.5 parallel fork: try host subagent BEFORE cancel so MAIN can keep flying.
-      if (this.rpwuEnabled() && this.rpwuOtherMode() === 'fork') {
-        const parallel = this.tryAdmitSubagentFork(input)
-        if (parallel) return
+    if (!decision.preempt) {
+      if (decision.claimAfterCancel && decision.target === 'next-step') {
+        this.inbox.splice('next-step', Infinity, 0, [input])
+        if (this.phase.kind === 'idle') this.wakeDriver(false)
+        else if (decision.wakeup) this.phase.wakeRequested = true
+        return
       }
+      this.send(input, decision.target, decision.wakeup)
+      return
+    }
 
-      // 1) Cooperative cancel — streamed assistant prefix stays in the session log.
-      this.cancel({ kind: 'user' }, { keepInbox: true })
-      // 2) Claim path: human OTHER first, optional fold notice (+ MAIN anchor) after.
-      const foldEnabled = this.steerFoldHintEnabled()
-      const mode = foldEnabled ? this.steerFoldMode() : null
-      // Snapshot MAIN before OTHER is claimed into the next-step inbox / session.
-      const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
-      // RPWU: bind/create MAIN; fold OTHER into it (default) or fork a sibling (P1-a).
-      let boundUnit: WorkUnit | null = null
-      let siblingUnit: WorkUnit | null = null
-      let unitBlock: string | null = null
-      let otherMode: 'fold' | 'fork' | null = null
-      if (this.rpwuEnabled()) {
-        otherMode = this.rpwuOtherMode()
-        const turn = this.phase.kind === 'running' ? this.phase.turn : 0
-        const step = this.phase.kind === 'running' ? this.phase.step : 0
-        const goalText = resumeAnchor
-          ?? extractLatestHumanUserText(this.session, {
-            excludeText: userMessagePlainText(input),
-          })
-          ?? 'unspecified MAIN'
-        boundUnit = this.workUnits.ensureMainUnit({
-          goalSummary: goalText,
-          turn,
-          step,
-          status: 'paused',
-        })
-        const otherText = userMessagePlainText(input) ?? 'OTHER'
-        const prefix = this.latestAssistantPrefixStats()
-        // Checkpoint MAIN at preempt (always) so resume has a pointer.
-        const mainCp = this.workUnits.appendCheckpoint({
-          unitId: boundUnit.id,
-          stepIndex: step,
-          turn,
-          assistantPrefixCursor: prefix.cursor,
-          assistantPrefixHash: prefix.hash,
-          toolResultRefs: [],
-          status: 'paused',
-          delivery: { ...boundUnit.delivery },
-          reason: 'preempt',
-        })
-        this.lastCheckpoint = mainCp
+    const foldEnabled = this.steerFoldHintEnabled()
+    const foldMode = foldEnabled ? this.steerFoldMode() : null
+    const resumeAnchor = foldEnabled ? this.resolveSteerResumeAnchor(input) : null
+    const turn = this.phase.kind === 'running' ? this.phase.turn : 0
+    const step = this.phase.kind === 'running' ? this.phase.step : 0
+    const otherText = userMessagePlainText(input) ?? 'OTHER'
+    const goalText = resumeAnchor
+      ?? extractLatestHumanUserText(this.session, { excludeText: otherText })
+      ?? 'unspecified MAIN'
+    const hasSubagentSeam = Boolean(resolveSubagentsRuntime({ ctx: this.loopCtx }))
 
-        if (otherMode === 'fork') {
-          // Degraded path: host subagent missing — registry sibling + single Agent.
-          siblingUnit = this.workUnits.forkSibling({
-            parentId: boundUnit.id,
-            goalSummary: otherText,
-            lane: 'user',
-            createdAtTurn: turn,
-            createdAtStep: step,
-            status: 'running',
-            // Keep MAIN as active control-plane; sibling is independently queryable.
-            bindActive: false,
-          })
-          const siblingCp = this.workUnits.appendCheckpoint({
-            unitId: siblingUnit.id,
-            stepIndex: step,
-            turn,
-            assistantPrefixCursor: 0,
-            assistantPrefixHash: prefix.hash,
-            toolResultRefs: [],
-            status: 'running',
-            delivery: { ...siblingUnit.delivery },
-            reason: 'preempt',
-          })
-          this.lastCheckpoint = siblingCp
-          unitBlock = buildUnitForkDegradedBlock(boundUnit, siblingUnit)
-        } else {
-          this.workUnits.foldOther(boundUnit.id, otherText)
-          unitBlock = buildUnitFoldBlock(boundUnit)
-        }
-      }
-      const batch = this.steerClaimBatch(input, resumeAnchor, boundUnit, unitBlock)
-      this.inbox.splice('next-step', Infinity, 0, batch)
-      // Trajectory-friendly preempt marker (not a user chat bubble; no full MAIN text).
+    const prefix = this.latestAssistantPrefixStats()
+    const result = this.orchestrator.admit({
+      kind,
+      input,
+      scheduler,
+      turn,
+      step,
+      mainGoalText: goalText,
+      otherText,
+      hasSubagentSeam,
+      otherMode: this.rpwuOtherMode(),
+      rpwuEnabled: this.rpwuEnabled(),
+      assistantPrefixCursor: prefix.cursor,
+      assistantPrefixHash: prefix.hash,
+    })
+    this.events?.emit({
+      type: 'admit',
+      action: result.action,
+      unitIds: result.unitIds,
+      at: Date.now(),
+    })
+
+    // True-parallel spawn: host subagent, MAIN keeps flying (no cancel).
+    if (result.action === 'spawn' && result.useSubagent && result.sibling && result.main) {
+      this.events?.emit({ type: 'spawn', unitId: result.sibling.id, parentId: result.main.id, at: Date.now() })
+      this.lastCheckpoint = result.sibling.checkpoints.at(-1)
+        ?? result.main.checkpoints.at(-1)
+        ?? null
       this.lastSteerPreempt = buildSteerPreemptMeta({
         foldInjected: foldEnabled,
-        mode,
+        mode: foldMode,
         resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
-        unitId: boundUnit?.id ?? null,
-        unitFoldPresent: boundUnit !== null,
-        otherMode,
-        siblingUnitId: siblingUnit?.id ?? null,
-        forkDegraded: otherMode === 'fork',
+        unitId: result.main.id,
+        unitFoldPresent: true,
+        otherMode: 'spawn',
+        siblingUnitId: result.sibling.id,
+        forkDegraded: false,
         childSessionId: null,
       })
-      // 3) Latch wake so kick() restarts after the aborted activity drains.
-      if (this.phase.kind !== 'idle') this.phase.wakeRequested = true
+      const noticeText = buildUnitForkBlock(result.main, result.sibling)
+      this.inbox.splice('next-step', Infinity, 0, [
+        createUserMessage({
+          content: [{ type: 'text', text: noticeText }],
+          source: {
+            kind: 'unit-fold-hint',
+            form: 'notice',
+            summary: `Subagent spawn: ${result.sibling.id} under MAIN ${result.main.id}`,
+          },
+        }),
+      ])
+      const abort = new AbortController()
+      this.subagentForkAborts.set(result.sibling.id, abort)
+      void this.launchSubagentFork({
+        siblingId: result.sibling.id,
+        mainId: result.main.id,
+        otherText,
+        subagents: resolveSubagentsRuntime({ ctx: this.loopCtx })!,
+        signal: abort.signal,
+      })
       return
     }
 
-    if (decision.claimAfterCancel && decision.target === 'next-step') {
-      // Steer while idle or already aborting: keep next-step, never stock remap.
-      this.inbox.splice('next-step', Infinity, 0, [input])
-      if (this.phase.kind === 'idle') {
-        this.wakeDriver(false)
-      } else if (decision.wakeup) {
-        this.phase.wakeRequested = true
-      }
-      return
+    // Absorb or degraded spawn → cooperative cancel-then-claim on this Agent.
+    this.cancel({ kind: 'user' }, { keepInbox: true })
+    const boundUnit = result.main ?? null
+    const siblingUnit = result.sibling ?? null
+    let unitBlock: string | null = null
+    if (boundUnit && result.action === 'spawn' && siblingUnit) {
+      unitBlock = buildUnitForkDegradedBlock(boundUnit, siblingUnit)
+      this.events?.emit({
+        type: 'spawn',
+        unitId: siblingUnit.id,
+        parentId: boundUnit.id,
+        degraded: true,
+        at: Date.now(),
+      })
+    } else if (boundUnit) {
+      unitBlock = buildUnitFoldBlock(boundUnit)
+      this.events?.emit({ type: 'absorb', unitId: boundUnit.id, at: Date.now() })
     }
-
-    this.send(input, decision.target, decision.wakeup)
+    this.lastCheckpoint = siblingUnit?.checkpoints.at(-1)
+      ?? boundUnit?.checkpoints.at(-1)
+      ?? null
+    const batch = this.steerClaimBatch(input, resumeAnchor, boundUnit, unitBlock)
+    this.inbox.splice('next-step', Infinity, 0, batch)
+    this.lastSteerPreempt = buildSteerPreemptMeta({
+      foldInjected: foldEnabled,
+      mode: foldMode,
+      resumeAnchorPresent: resumeAnchor !== null && resumeAnchor.length > 0,
+      unitId: boundUnit?.id ?? null,
+      unitFoldPresent: boundUnit !== null,
+      otherMode: result.action === 'spawn' ? 'spawn' : (boundUnit ? 'fold' : null),
+      siblingUnitId: siblingUnit?.id ?? null,
+      forkDegraded: result.degraded,
+      childSessionId: null,
+    })
+    if (this.phase.kind !== 'idle') this.phase.wakeRequested = true
   }
 
   /**
@@ -786,16 +850,23 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
-  /** Map child result → peer packet → foldSiblingIntoMain + inbox notice. */
+  /** Map child result → MergeBus.publish + DeliveryGate + settle drain. */
   private foldSubagentSiblingIntoMain(siblingId: string, result: SubagentResultLike): void {
     const sibling = this.workUnits.get(siblingId)
     if (!sibling || !sibling.parentId) return
     const packet = peerPacketFromSubagentResult(result, sibling.goalSummary)
-    const { notice } = this.workUnits.foldSiblingIntoMain({
+    const { notice, main } = this.mergeBus.publish({ siblingId, packet })
+    this.events.emit({
+      type: 'merge',
       siblingId,
-      packet,
-      deliveryGate: this.deliveryGateEnabled(),
-      maxRetries: this.deliveryGateMaxRetries(),
+      mainId: main.id,
+      at: Date.now(),
+    })
+    settleTurn({
+      registry: this.workUnits,
+      store: this.checkpointStore,
+      unitId: main.id,
+      events: this.events,
     })
     this.inbox.splice('next-step', Infinity, 0, [notice])
     if (this.phase.kind === 'idle') this.wakeDriver(false)

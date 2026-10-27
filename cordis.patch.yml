@@ -1,4 +1,4 @@
-# GrokBot Loop bundle layer.
+# GrokBot Loop bundle layer — Ideal Topology v1.1 (0.2.0).
 #
 # Cordis include patches cannot change `name` on an existing id (same-id rename
 # is rejected with "name mismatch … skipping"). Disable the stock row, then
@@ -6,6 +6,10 @@
 # plugin itself, not by the stock entry id.
 #
 # Uninstall / remove this patch to restore `@deepseek-ai/dsh-agent-loop`.
+#
+# BREAKING 0.2.0: rpwuOtherMode default is `spawn` (ideal). Set `fold` for
+# 0.1.x short-protocol compat. Mount dsh-subagent + spawn-in-process for true
+# parallel; without the seam, spawn degrades visibly (never throws).
 
 - id: agent-loop
   disabled: true
@@ -20,10 +24,11 @@
         steerFoldMode: bot-like
         steerResumeAnchor: true
         rpwuEnabled: true
-        # fold (default): OTHER into MAIN. fork|subagent: try host startActivation.
-        rpwuOtherMode: fold
+        # Ideal Topology v1.1 default: spawn (fold = explicit compat).
+        rpwuOtherMode: spawn
         rpwuSubagentProvider: spawn
         rpwuSubagentDelivery: caller
+        rpwuCheckpointStore: memory
         deliveryGate: true
         deliveryGateMaxRetries: 2
         agents: []

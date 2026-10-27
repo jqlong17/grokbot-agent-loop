@@ -25,7 +25,7 @@ async function harness(adapter: MockAdapter, config: {
   steerFoldMode?: 'bot-like' | 'minimal'
   steerResumeAnchor?: boolean
   rpwuEnabled?: boolean
-  rpwuOtherMode?: 'fold' | 'fork'
+  rpwuOtherMode?: 'fold' | 'fork' | 'spawn' | 'subagent'
   deliveryGate?: boolean
   deliveryGateMaxRetries?: number
 } = {}) {
@@ -628,14 +628,14 @@ describe('GrokBot interruptible loop', () => {
       lastSteerPreempt: {
         unitId: string | null
         unitFoldPresent: boolean
-        otherMode: 'fold' | 'fork' | null
+        otherMode: 'fold' | 'fork' | 'spawn' | null
         siblingUnitId: string | null
         forkDegraded: boolean | null
         childSessionId: string | null
       } | null
     }
 
-    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('fork')
+    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('spawn')
     expect(loopAgent.lastSteerPreempt?.forkDegraded).toBe(true)
     expect(loopAgent.lastSteerPreempt?.childSessionId).toBeNull()
     expect(loopAgent.lastSteerPreempt?.siblingUnitId).toBeTruthy()
