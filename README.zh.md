@@ -66,11 +66,23 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - `steerFoldMode`（默认 `bot-like`）— `bot-like` 用完整两阶段契约文案；`minimal` 用更短 notice，顺序契约相同
 - `steerResumeAnchor`（默认 `true`）— 抢占 fold notice 嵌入未完成 MAIN 用户原文摘要（≤1200 字），强制同一条可见对话里续写；`false` 时≈0.1.4（无锚点引用）
 - `rpwuEnabled`（默认 `true`）— RPWU：会话内 WorkUnit 注册表 + step checkpoint + fold-into-unit；`false` 时≈0.1.5
-- `rpwuOtherMode`（默认 `fold`）— P1-a/P1.5：`fold` 把 OTHER 折进 MAIN（保持 0.1.7 短协议）；`fork` / `subagent` 走宿主 `ctx.subagents.startActivation` 拉起子 Session；无 seam 时降级为 registry-only + `[grokbot-unit-fork-degraded]`
-- `rpwuSubagentProvider`（默认 `spawn`）— `startActivation` 的 provider 名（`spawn` / `fork`）
-- `rpwuSubagentDelivery`（默认 `caller`）— `caller` 由插件 await 结果并 fold；`parent` 同时走宿主父级通知
-- `deliveryGate`（默认 `true`，依赖 RPWU）— 非实质/仅 workspace 交付时不让 unit 完成；若 unit 带 `deliverySpec`，一并校验 shape + sink
-- `deliveryGateMaxRetries`（默认 `2`）— 每个 unit 最多 DeliveryGate 续跑次数
+- `rpwuOtherMode`（默认 **`spawn`**，0.2.0 破坏性）— 终局路径：宿主 `startActivation` 拉子 Session；`fork`/`subagent` 同义；**`fold`** 为 0.1.x 短协议兼容。无 seam → `[grokbot-unit-fork-degraded]`，不抛
+- `rpwuSubagentProvider` / `rpwuSubagentDelivery` — 同前
+- `rpwuCheckpointStore`（默认 `memory`）— `file` 启用文件骨架
+- `deliveryGate` / `deliveryGateMaxRetries` — 同前
+
+### 理想拓扑（0.2.0）
+
+```
+用户/插话 → Orchestrator（absorb|spawn|cancel|queue）
+              → WorkUnit + TurnRunShell / ActivationManager
+              → CheckpointStore（DurableWorkflow seam）
+              → MergeBus + DeliveryGate → 主对话
+```
+
+**Outer** = 本插件；**Inner** = dsh ReAct；真并行 = 宿主 subagent。契约：[`docs/ideal-topology.md`](./docs/ideal-topology.md)。
+
+**相对 0.1.9 破坏性：** 默认 `fold`→`spawn`；包布局拆分（根入口仍 re-export）。打断 ⊥ 耐久分测。
 
 ### 0.1.9 改动摘要
 

@@ -1,8 +1,7 @@
 # Example profile overlay (~/.dsh/profiles/<name>/cordis.patch.yml)
-# Cordis cannot rename an existing id's package; disable stock then insert.
+# Ideal Topology v1.1 / 0.2.0 — default spawn path.
 #
-# True-parallel OTHER (P1.5) also needs host subagent packages in the profile,
-# for example (add alongside this overlay — names match dsh 0.2.1-rc.3 line):
+# True-parallel OTHER needs host subagent packages in the profile:
 #   - id: subagent
 #     name: '@deepseek-ai/dsh-subagent'
 #   - id: subagent-spawn
@@ -10,7 +9,8 @@
 # Optional history-seeded child:
 #   - id: subagent-fork
 #     name: '@deepseek-ai/dsh-subagent-fork-in-process'
-# Then set rpwuOtherMode: fork (or subagent) below.
+#
+# BREAKING: rpwuOtherMode default is spawn. Set fold for 0.1.x short-protocol.
 
 - id: agent-loop
   disabled: true
@@ -20,24 +20,15 @@
       name: '@harness-plugins/grokbot-agent-loop'
       config:
         maxParallelToolCalls: 10
-        # Busy Enter / agent.steer() cooperatively cancels mid-stream and claims
-        # on the next step. Set false to match stock next-step-wait semantics.
         interruptOnSteer: true
-        # After preempt, inject a producer notice: handle OTHER first, then
-        # resume the prior unfinished task (prompt-layer fold vs grok.com Bot).
         steerFoldHint: true
         steerFoldMode: bot-like
         steerResumeAnchor: true
         rpwuEnabled: true
-        # fold (default): OTHER folds into MAIN (0.1.7 short-protocol).
-        # fork|subagent: start a host child Session via ctx.subagents.startActivation;
-        # without dsh-subagent (+ spawn), degrades to registry-only + [grokbot-unit-fork-degraded].
-        rpwuOtherMode: fold
+        rpwuOtherMode: spawn
         rpwuSubagentProvider: spawn
         rpwuSubagentDelivery: caller
+        rpwuCheckpointStore: memory
         deliveryGate: true
         deliveryGateMaxRetries: 2
         agents: []
-
-# Complementary shortcut (Cmd/Ctrl+Enter) still uses agent.followup() →
-# next-turn QueueDock parking — no patch change required for that path.

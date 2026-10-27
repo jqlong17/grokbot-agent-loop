@@ -16,8 +16,23 @@ import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session';
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts';
 export { decideAdmission, agentLaneAllowed, cancelThenClaimOrder, type AdmissionDecision, type AdmissionKind, type InboxLaneTarget, type PriorityLane, type SchedulerState, } from './scheduler.ts';
 export { STEER_FOLD_HINT_MARKER, STEER_FOLD_HINT_TEXT, STEER_FOLD_HINT_TEXT_BOT_LIKE, STEER_FOLD_HINT_TEXT_MINIMAL, DEFAULT_RESUME_ANCHOR_MAX, appendResumeAnchorBlock, appendUnitFoldBlock, buildSteerFoldHintMessage, buildSteerClaimBatch, buildSteerPreemptMeta, countSteerFoldHints, extractLatestHumanUserText, isSteerFoldHint, resolveSteerFoldHintText, resolveSteerFoldHintTextWithAnchor, truncateAnchor, userMessagePlainText, type SteerFoldBuildOptions, type SteerFoldMode, type SteerPreemptMeta, } from './steer-fold.ts';
-export { WorkUnitRegistry, UNIT_FOLD_MARKER, UNIT_FORK_MARKER, UNIT_FORK_DEGRADED_MARKER, UNIT_FOLD_BACK_MARKER, PEER_HANDOFF_MARKER, DELIVERY_GATE_MARKER, DEFAULT_DELIVERY_GATE_MAX, DEFAULT_SUBSTANTIVE_MIN_CHARS, DEFAULT_GOAL_SUMMARY_MAX, DEFAULT_PEER_DELIVERY_SHAPE, assistantPrefixStats, buildDeliveryGateMeta, buildDeliveryGateNotice, buildPeerHandoffNotice, buildUnitFoldBackNotice, buildUnitFoldBlock, buildUnitForkBlock, buildUnitForkDegradedBlock, canMarkCompleted, defaultPeerDeliverySpec, inferDeliveryFromBlocks, isDeliveryGateNotice, isDeliverySpecMet, isPeerHandoffNotice, isSubstantiveAssistantText, normalizePeerHandoffPacket, normalizeRpwuOtherMode, peerPacketToPayload, shouldRunDeliveryGate, simpleTextHash, summarizeGoal, verifyDeliverySpec, type CheckpointReason, type CreateWorkUnitInput, type DeliveryGateMeta, type DeliverySink, type DeliverySpec, type InferDeliveryOptions, type PeerHandoffPacket, type RpwuOtherMode, type StepCheckpoint, type ToolResultRef, type WorkUnit, type WorkUnitActivationRef, type WorkUnitDelivery, type WorkUnitLane, type WorkUnitQuery, type WorkUnitSnapshot, type WorkUnitStatus, } from './work-unit.ts';
-export { peerPacketFromSubagentResult, resolveSubagentsRuntime, startWorkUnitSubagent, type StartedWorkUnitSubagent, type StartWorkUnitSubagentOptions, type SubagentActivationLike, type SubagentResultLike, type SubagentsRuntimeLike, } from './work-unit-subagent.ts';
+export { WorkUnitRegistry, UNIT_FOLD_MARKER, UNIT_FORK_MARKER, UNIT_FORK_DEGRADED_MARKER, UNIT_FOLD_BACK_MARKER, PEER_HANDOFF_MARKER, DELIVERY_GATE_MARKER, DEFAULT_DELIVERY_GATE_MAX, DEFAULT_SUBSTANTIVE_MIN_CHARS, DEFAULT_GOAL_SUMMARY_MAX, DEFAULT_PEER_DELIVERY_SHAPE, assistantPrefixStats, buildDeliveryGateMeta, buildDeliveryGateNotice, buildPeerHandoffNotice, buildUnitFoldBackNotice, buildUnitFoldBlock, buildUnitForkBlock, buildUnitForkDegradedBlock, canMarkCompleted, defaultPeerDeliverySpec, inferDeliveryFromBlocks, isDeliveryGateNotice, isDeliverySpecMet, isPeerHandoffNotice, isSubstantiveAssistantText, normalizePeerHandoffPacket, normalizeRpwuOtherMode, peerPacketToPayload, shouldRunDeliveryGate, simpleTextHash, summarizeGoal, verifyDeliverySpec, type CheckpointReason, type CreateWorkUnitInput, type DeliveryGateMeta, type DeliverySink, type DeliverySpec, type InferDeliveryOptions, type PeerHandoffPacket, type RpwuOtherMode, type StepCheckpoint, type ToolResultRef, type WorkUnit, type WorkUnitActivationRef, type WorkUnitDelivery, type WorkUnitLane, type WorkUnitQuery, type WorkUnitSnapshot, type WorkUnitStatus, } from './unit/work-unit.ts';
+export { peerPacketFromSubagentResult, resolveSubagentsRuntime, startWorkUnitSubagent, type StartedWorkUnitSubagent, type StartWorkUnitSubagentOptions, type SubagentActivationLike, type SubagentResultLike, type SubagentsRuntimeLike, } from './unit/subagent.ts';
+export { Orchestrator, classifyAdmit } from './orchestrator/index.ts';
+export type { AdmitEvent, AdmitResult, ClassifyResult, OrchestratorAction, OrchestratorOptions, } from './orchestrator/index.ts';
+export { PassthroughDecisionLayer, type DecisionLayer, type DecisionLayerInput, type DecisionLayerResult, } from './orchestrator/decision-layer.ts';
+export { MemoryCheckpointStore, FileCheckpointStore, type CheckpointStore, } from './checkpoint/index.ts';
+export { MemoryDurableWorkflow, FileDurableWorkflow, createDurableWorkflow, type DurableWorkflow, type DurableWorkflowKind, } from './checkpoint/durable-workflow.ts';
+export { MergeBus, type MergePacket, type MergePublishResult } from './merge/index.ts';
+export { DeliveryGate } from './delivery/index.ts';
+export { InProcessRunner, SubagentRunner, type UnitRunner, type UnitStepResult, } from './unit/runner.ts';
+export { ActivationManager, type ActivationStartResult } from './unit/activation-manager.ts';
+export { createWorkId, createInputRecord, type WorkId, type InputId, type InputRecord, } from './unit/input-record.ts';
+export { TurnRunShell } from './turn/turn-run-shell.ts';
+export { settleTurn, type TurnSettleResult } from './turn/settle.ts';
+export { checkpointChain, completedStepsSurvivedPreempt, isCompletedStepCheckpoint, type Turn, type Step, type AfterStepCheckpoint, type CheckpointChain, } from './turn-step.ts';
+export { AgentEventBus, type AgentEvent, type AgentEventListener } from './events.ts';
+export { dualSessionPair, StubSummarySession, asMainSession, type DualSessionPair, type DualSessionHandle, type SummarySession, type MainSession, type SessionRole, } from './session/main-summary.ts';
 /** Host projection of agent turn and step boundaries. */
 export declare const turnBoundaryProjectionDefinition: {
     key: "turnBoundary";
@@ -124,21 +139,27 @@ export interface Config {
      */
     rpwuEnabled: boolean;
     /**
-     * RPWU P1-a / P1.5: how a preempting OTHER workstream joins the registry.
-     * - `fold` (default): fold into MAIN — preserves 0.1.7 short-protocol behavior
-     * - `fork` / `subagent`: try host `ctx.subagents.startActivation` for a real
-     *   child Session; degrade to registry-only sibling when the seam is absent
+     * Ideal Topology v1.1: how OTHER joins the registry.
+     * - `spawn` (default, 0.2.0+): try host `ctx.subagents.startActivation`
+     * - `fork` / `subagent`: aliases of spawn
+     * - `fold`: explicit compat — fold into MAIN (0.1.x short-protocol)
      */
-    rpwuOtherMode: 'fold' | 'fork' | 'subagent';
+    rpwuOtherMode: 'fold' | 'fork' | 'subagent' | 'spawn';
     /**
-     * P1.5: provider name passed to `startActivation` when fork/subagent mode
-     * has a live host seam (default `spawn`).
+     * Provider name passed to `startActivation` when spawn path has a live host
+     * seam (default `spawn`).
      */
     rpwuSubagentProvider: string;
     /**
-     * P1.5: activation delivery policy (default `caller` — plugin folds result).
+     * Activation delivery policy (default `caller` — plugin folds result).
      */
     rpwuSubagentDelivery: 'parent' | 'caller';
+    /**
+     * CheckpointStore backend (default `memory`). `file` uses skeleton FileCheckpointStore.
+     */
+    rpwuCheckpointStore: 'memory' | 'file';
+    /** Path for `rpwuCheckpointStore: file` (optional). */
+    rpwuCheckpointPath?: string;
     /**
      * When true (default, requires rpwuEnabled), a unit cannot complete on
      * workspace-only / non-substantive delivery; inject chat-visible continuations.
@@ -174,9 +195,11 @@ export declare class AgentLoop extends Service implements AgentFactory {
         steerFoldMode?: 'bot-like' | 'minimal';
         steerResumeAnchor?: boolean;
         rpwuEnabled?: boolean;
-        rpwuOtherMode?: 'fold' | 'fork' | 'subagent';
+        rpwuOtherMode?: 'fold' | 'fork' | 'subagent' | 'spawn';
         rpwuSubagentProvider?: string;
         rpwuSubagentDelivery?: 'parent' | 'caller';
+        rpwuCheckpointStore?: 'memory' | 'file';
+        rpwuCheckpointPath?: string;
         deliveryGate?: boolean;
         deliveryGateMaxRetries?: number;
     }, Config>;

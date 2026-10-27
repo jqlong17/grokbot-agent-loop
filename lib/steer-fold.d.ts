@@ -120,18 +120,19 @@ export interface SteerPreemptMeta {
     /** RPWU P0: whether a unit-fold / unit-fork marker was embedded. */
     readonly unitFoldPresent: boolean;
     /**
-     * RPWU P1-a / P1.5: how OTHER joined the registry (`fold` default / `fork` sibling).
+     * Ideal Topology: how OTHER joined (`spawn` default / `fold` compat).
+     * `fork` retained as alias of spawn in trajectory meta.
      * Null when RPWU did not run on this preempt.
      */
-    readonly otherMode: 'fold' | 'fork' | null;
-    /** RPWU P1-a: forked sibling unit id when otherMode is `fork`. */
+    readonly otherMode: 'fold' | 'fork' | 'spawn' | null;
+    /** Spawned sibling unit id when otherMode is spawn/fork. */
     readonly siblingUnitId: string | null;
     /**
-     * P1.5: true when fork ran without host `ctx.subagents` (registry-only degrade).
-     * False when subagent-backed parallel fork succeeded; null when not a fork path.
+     * True when spawn ran without host `ctx.subagents` (registry-only degrade).
+     * False when subagent-backed parallel succeeded; null when not a spawn path.
      */
     readonly forkDegraded: boolean | null;
-    /** P1.5: host child Session id when subagent-backed fork linked a child. */
+    /** Host child Session id when subagent-backed spawn linked a child. */
     readonly childSessionId: string | null;
 }
 /** Build a trajectory-friendly preempt meta record. */
@@ -141,7 +142,7 @@ export declare function buildSteerPreemptMeta(options: {
     resumeAnchorPresent?: boolean;
     unitId?: string | null;
     unitFoldPresent?: boolean;
-    otherMode?: 'fold' | 'fork' | null;
+    otherMode?: 'fold' | 'fork' | 'spawn' | null;
     siblingUnitId?: string | null;
     forkDegraded?: boolean | null;
     childSessionId?: string | null;

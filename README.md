@@ -46,15 +46,16 @@ The package ships `cordis.patch.yml` that replaces Cordis id `agent-loop`:
     steerFoldMode: bot-like
     steerResumeAnchor: true
     rpwuEnabled: true
-    rpwuOtherMode: fold
+    rpwuOtherMode: spawn   # 0.2.0 default (fold = compat)
     rpwuSubagentProvider: spawn
     rpwuSubagentDelivery: caller
+    rpwuCheckpointStore: memory
     deliveryGate: true
     deliveryGateMaxRetries: 2
     agents: []
 ```
 
-See [`examples/cordis.patch.yml`](./examples/cordis.patch.yml) for a copy-paste profile overlay (includes optional `dsh-subagent` + spawn deps for P1.5).
+See [`examples/cordis.patch.yml`](./examples/cordis.patch.yml) and [`docs/ideal-topology.md`](./docs/ideal-topology.md).
 
 ### Manual profile patch
 
@@ -82,11 +83,24 @@ Config flags:
 - `steerFoldMode` (default `bot-like`) — `bot-like` full two-phase copy; `minimal` shorter notice, same ordering contract
 - `steerResumeAnchor` (default `true`) — embed a truncated unfinished MAIN user quote in the fold notice so the model resumes the exact prior deliverable in visible chat; set `false` for 0.1.4-style notices
 - `rpwuEnabled` (default `true`) — RPWU WorkUnit registry + step checkpoints + fold-into-unit; set `false` for ≈0.1.5 behavior
-- `rpwuOtherMode` (default `fold`) — P1-a/P1.5: `fold` keeps OTHER inside MAIN (0.1.7 short-protocol); `fork` / `subagent` try host `ctx.subagents.startActivation` for a real child Session, then fold back into MAIN; without the seam, degrade to registry-only + `[grokbot-unit-fork-degraded]`
-- `rpwuSubagentProvider` (default `spawn`) — provider name for `startActivation` (`spawn` or `fork`)
-- `rpwuSubagentDelivery` (default `caller`) — `caller` = plugin awaits result and folds; `parent` also lets the host inject a parent notice
-- `deliveryGate` (default `true`, requires RPWU) — block unit completion on non-substantive / workspace-only delivery; when a unit has `deliverySpec`, also verify shape + sink
-- `deliveryGateMaxRetries` (default `2`) — max DeliveryGate continuation injections per unit
+- `rpwuOtherMode` (default **`spawn`**, breaking in 0.2.0) — ideal path: host `ctx.subagents.startActivation` for a child Session; `fork`/`subagent` aliases; **`fold`** = explicit 0.1.x short-protocol compat. Missing seam → `[grokbot-unit-fork-degraded]`, never throws
+- `rpwuSubagentProvider` (default `spawn`) — provider name for `startActivation`
+- `rpwuSubagentDelivery` (default `caller`) — plugin awaits result and folds
+- `rpwuCheckpointStore` (default `memory`) — `file` enables FileCheckpointStore skeleton
+- `deliveryGate` / `deliveryGateMaxRetries` — unchanged
+
+### Ideal Topology (0.2.0)
+
+```
+User/steer → Orchestrator (absorb|spawn|cancel|queue)
+                → WorkUnits + TurnRunShell / ActivationManager
+                → CheckpointStore (DurableWorkflow seam)
+                → MergeBus + DeliveryGate → MAIN chat
+```
+
+**Outer** = this plugin (admit, durability, merge, gate, AgentEvent). **Inner** = dsh ReAct. True parallel = host subagent. Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md).
+
+**Breaking vs 0.1.9:** default `rpwuOtherMode` `fold` → `spawn`; package layout split under `orchestrator/` `unit/` `checkpoint/` `merge/` `delivery/` (root re-exports kept). Interruptible ⊥ Durable tested separately.
 
 ### 0.1.9 notes
 

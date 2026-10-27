@@ -203,7 +203,7 @@ describe('RPWU P1.5 subagent-backed fork', () => {
         active: () => { id: string; lastPeerPacket: { theme: string } | null; foldedOtherSummaries: string[] } | null
       }
       lastSteerPreempt: {
-        otherMode: 'fold' | 'fork' | null
+        otherMode: 'fold' | 'fork' | 'spawn' | null
         siblingUnitId: string | null
         forkDegraded: boolean | null
         childSessionId: string | null
@@ -211,7 +211,7 @@ describe('RPWU P1.5 subagent-backed fork', () => {
       } | null
     }
 
-    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('fork')
+    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('spawn')
     expect(loopAgent.lastSteerPreempt?.forkDegraded).toBe(false)
     expect(loopAgent.lastSteerPreempt?.siblingUnitId).toBeTruthy()
 
@@ -289,7 +289,7 @@ describe('RPWU P1.5 subagent-backed fork', () => {
 
     const loopAgent = agent as typeof agent & {
       lastSteerPreempt: {
-        otherMode: 'fold' | 'fork' | null
+        otherMode: 'fold' | 'fork' | 'spawn' | null
         forkDegraded: boolean | null
         siblingUnitId: string | null
         childSessionId: string | null
@@ -299,7 +299,7 @@ describe('RPWU P1.5 subagent-backed fork', () => {
       }
     }
 
-    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('fork')
+    expect(loopAgent.lastSteerPreempt?.otherMode).toBe('spawn')
     expect(loopAgent.lastSteerPreempt?.forkDegraded).toBe(true)
     expect(loopAgent.lastSteerPreempt?.childSessionId).toBeNull()
     expect(loopAgent.workUnits.query(loopAgent.lastSteerPreempt!.siblingUnitId!)?.childSessionId).toBeNull()

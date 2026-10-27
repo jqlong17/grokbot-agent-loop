@@ -1,7 +1,7 @@
 {
   "name": "@harness-plugins/grokbot-agent-loop",
   "description": "GrokBot Loop — interruptible dual-lane agent-loop plugin for DeepSeek Harness (community homage; not affiliated with xAI)",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
