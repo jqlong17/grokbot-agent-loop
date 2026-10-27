@@ -71,17 +71,18 @@ dsh plugin --profile web remove @harness-plugins/grokbot-agent-loop
 - `rpwuCheckpointStore`（默认 `memory`）— `file` 启用文件骨架
 - `deliveryGate` / `deliveryGateMaxRetries` — 同前
 
-### 理想拓扑（0.2.1 — 主路径已挂）
+### 理想拓扑（0.2.2 — 并行金标 + DecisionLayer）
 
 ```
-用户/插话 → Orchestrator.admit（absorb|spawn|cancel|queue）
-              → TurnRunShell（checkpointChain + turn-settle）     ← 实路径
-              → ActivationManager（start/wait/cancel/degrade）  ← spawn 实路径
-              → CheckpointStore（DurableWorkflow seam）
-              → MergeBus + DeliveryGate → 主对话
+用户/插话 → DecisionLayer.score/route → Orchestrator.admit
+              → TurnRunShell（checkpointChain + turn-settle）
+              → ActivationManager（start/wait/cancel；父子 Session 可观测）
+              → CheckpointStore → MergeBus + DeliveryGate → 主对话
 ```
 
-**0.2.1：** Agent 收薄为 Cordis 宿主胶水；admitted turn 走 **TurnRunShell**；spawn/宿主并行走 **ActivationManager**（无 seam → 可见 degrade，不抛）。Orchestrator 仍是唯一 admit 路由脑。契约：[`docs/ideal-topology.md`](./docs/ideal-topology.md)。
+**0.2.2（B+C）：** 假 seam 下双 Session 金标可测；无 seam → degrade 不抛。`RuleDecisionLayer` 廉价 absorb/spawn/cancel/queue（LLM 不当 OS）。可选活体：`npm run smoke:live-parallel`（无 `GROKBOT_LIVE_PARALLEL=1` 则跳过）。契约：[`docs/ideal-topology.md`](./docs/ideal-topology.md) · [`CHANGELOG.md`](./CHANGELOG.md)。
+
+**0.2.1：** Agent = Cordis 胶水；TurnRunShell + ActivationManager 主路径已挂。
 
 **Outer** = 本插件；**Inner** = dsh ReAct；真并行 = 宿主 subagent。
 

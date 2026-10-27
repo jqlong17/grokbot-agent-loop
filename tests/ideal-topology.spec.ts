@@ -16,6 +16,8 @@ import {
   TurnRunShell,
   AgentEventBus,
   PassthroughDecisionLayer,
+  RuleDecisionLayer,
+  scoreRoute,
   createDurableWorkflow,
   createWorkId,
   createInputRecord,
@@ -272,13 +274,23 @@ describe('Ideal Topology v1.1 — AgentEvent + DecisionLayer + dual session + Du
     expect(bus.history.map(e => e.type)).toEqual(['admit', 'checkpoint', 'merge'])
   })
 
-  it('DecisionLayer passthrough stub', () => {
-    const layer = new PassthroughDecisionLayer()
-    const result = layer.decide({
+  it('DecisionLayer passthrough + RuleDecisionLayer score/route', () => {
+    const passthrough = new PassthroughDecisionLayer()
+    expect(passthrough.decide({
       event: busySteerEvent() as never,
       proposed: 'spawn',
+    })).toMatchObject({ action: 'spawn', reason: 'passthrough', score: 1 })
+
+    const rule = new RuleDecisionLayer()
+    const short = rule.decide({
+      event: busySteerEvent({ otherText: 'ok' }) as never,
+      proposed: 'spawn',
     })
-    expect(result.action).toBe('spawn')
+    expect(short.action).toBe('absorb')
+    expect(scoreRoute({
+      event: busySteerEvent({ otherText: 'packing list please' }) as never,
+      proposed: 'spawn',
+    }).action).toBe('spawn')
   })
 
   it('InputRecord + workId mint', () => {

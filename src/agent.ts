@@ -370,6 +370,14 @@ export class ReactLoopAgent implements Agent {
   }
 
   /**
+   * Live ActivationManager for spawn (tests / trajectory).
+   * `starts` records parentId ≠ childSessionId when seam is present.
+   */
+  get hostActivations(): ActivationManager {
+    return this.activations()
+  }
+
+  /**
    * Ensure a TurnRunShell for the active unit + turn index.
    * Main path: step checkpoints and turn-settle go through this shell.
    */
@@ -622,6 +630,14 @@ export class ReactLoopAgent implements Agent {
       unitIds: result.unitIds,
       at: Date.now(),
     })
+    if (result.decisionReason) {
+      this.events.emit({
+        type: 'decision',
+        action: result.action,
+        reason: result.decisionReason,
+        at: Date.now(),
+      })
+    }
 
     // True-parallel spawn: ActivationManager owns host start/wait/cancel/degrade.
     if (result.action === 'spawn' && result.useSubagent && result.sibling && result.main) {

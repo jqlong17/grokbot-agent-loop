@@ -57,6 +57,10 @@ export interface AdmitResult {
     readonly target: 'next-step' | 'next-turn';
     readonly wakeup: boolean;
     readonly claimAfterCancel: boolean;
+    /** DecisionLayer reason (cheap score/route). */
+    readonly decisionReason?: string;
+    /** DecisionLayer confidence in [0, 1]. */
+    readonly decisionScore?: number;
 }
 /** Classify-only decision (no registry mutation). */
 export interface ClassifyResult {

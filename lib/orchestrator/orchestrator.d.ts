@@ -12,6 +12,7 @@ import { MergeBus } from '../merge/bus.ts';
 import { DeliveryGate } from '../delivery/gate.ts';
 import { classifyAdmit } from './classify.ts';
 import type { AdmitEvent, AdmitResult, OrchestratorAction } from './types.ts';
+import { type DecisionLayer } from './decision-layer.ts';
 export interface OrchestratorOptions {
     readonly registry?: WorkUnitRegistry;
     readonly checkpointStore?: CheckpointStore;
@@ -19,26 +20,39 @@ export interface OrchestratorOptions {
     readonly deliveryGateMaxRetries?: number;
     /** Default OTHER mode when event omits otherMode (0.2.0 default: spawn). */
     readonly defaultOtherMode?: 'fold' | 'spawn' | 'fork' | 'subagent';
+    /**
+     * Cheap score/route before expensive spawn (0.2.2 default: RuleDecisionLayer).
+     * Pass PassthroughDecisionLayer to opt out. Sync only on the admit path.
+     */
+    readonly decisionLayer?: DecisionLayer;
 }
 /**
- * Single admission brain: absorb | spawn | cancel.
+ * Single admission brain: absorb | spawn | cancel | queue.
  * Completed step checkpoints are synced to CheckpointStore so preempt cannot
- * erase them (hard invariant).
+ * erase them (hard invariant). DecisionLayer may cheaply refine classify
+ * before spawn; LLM still does not route.
  */
 export declare class Orchestrator {
     readonly registry: WorkUnitRegistry;
     readonly checkpointStore: CheckpointStore;
     readonly mergeBus: MergeBus;
     readonly deliveryGate: DeliveryGate;
+    readonly decisionLayer: DecisionLayer;
     private readonly defaultOtherMode;
     constructor(options?: OrchestratorOptions);
     /** Hydrate registry from the attached CheckpointStore. */
     hydrate(): void;
     /**
      * Admit one inbox event.
-     * Mutates registry for absorb/spawn/cancel; returns action + unitIds for the host.
+     * Mutates registry for absorb/spawn/cancel/queue; returns action + unitIds for the host.
+     * classify → DecisionLayer (cheap) → physical registry mutation.
      */
     admit(event: AdmitEvent): AdmitResult;
+    /**
+     * Sync DecisionLayer only — async layers fall back to proposed
+     * (admit path must stay synchronous).
+     */
+    private applyDecision;
     /** Persist a checkpoint into both registry and store (preempt-safe). */
     recordCheckpoint(cp: Omit<StepCheckpoint, 'at'> & {
         at?: number;

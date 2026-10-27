@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { ReactLoopInbox } from './inbox.ts';
 import { type SteerPreemptMeta } from './steer-fold.ts';
 import { type DeliveryGateMeta, type StepCheckpoint } from './unit/work-unit.ts';
+import { ActivationManager } from './unit/activation-manager.ts';
 import { Orchestrator } from './orchestrator/orchestrator.ts';
 import { MergeBus } from './merge/bus.ts';
 import type { CheckpointStore } from './checkpoint/store.ts';
@@ -119,6 +120,11 @@ export declare class ReactLoopAgent implements Agent {
     private rpwuSubagentDelivery;
     /** Host ActivationManager (spawn path); never throws on missing seam. */
     private activations;
+    /**
+     * Live ActivationManager for spawn (tests / trajectory).
+     * `starts` records parentId ≠ childSessionId when seam is present.
+     */
+    get hostActivations(): ActivationManager;
     /**
      * Ensure a TurnRunShell for the active unit + turn index.
      * Main path: step checkpoints and turn-settle go through this shell.

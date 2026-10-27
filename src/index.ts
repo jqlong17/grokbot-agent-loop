@@ -148,6 +148,8 @@ export type {
 } from './orchestrator/index.ts'
 export {
   PassthroughDecisionLayer,
+  RuleDecisionLayer,
+  scoreRoute,
   type DecisionLayer,
   type DecisionLayerInput,
   type DecisionLayerResult,
@@ -176,6 +178,7 @@ export {
   ActivationManager,
   type ActivationStartResult,
   type ActivationWaitResult,
+  type ActivationStartRecord,
 } from './unit/activation-manager.ts'
 export {
   createWorkId,
