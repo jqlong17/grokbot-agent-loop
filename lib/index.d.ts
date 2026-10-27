@@ -20,13 +20,13 @@ export { WorkUnitRegistry, UNIT_FOLD_MARKER, UNIT_FORK_MARKER, UNIT_FORK_DEGRADE
 export { peerPacketFromSubagentResult, resolveSubagentsRuntime, startWorkUnitSubagent, type StartedWorkUnitSubagent, type StartWorkUnitSubagentOptions, type SubagentActivationLike, type SubagentResultLike, type SubagentsRuntimeLike, } from './unit/subagent.ts';
 export { Orchestrator, classifyAdmit } from './orchestrator/index.ts';
 export type { AdmitEvent, AdmitResult, ClassifyResult, OrchestratorAction, OrchestratorOptions, } from './orchestrator/index.ts';
-export { PassthroughDecisionLayer, type DecisionLayer, type DecisionLayerInput, type DecisionLayerResult, } from './orchestrator/decision-layer.ts';
+export { PassthroughDecisionLayer, RuleDecisionLayer, scoreRoute, type DecisionLayer, type DecisionLayerInput, type DecisionLayerResult, } from './orchestrator/decision-layer.ts';
 export { MemoryCheckpointStore, FileCheckpointStore, type CheckpointStore, } from './checkpoint/index.ts';
 export { MemoryDurableWorkflow, FileDurableWorkflow, createDurableWorkflow, type DurableWorkflow, type DurableWorkflowKind, } from './checkpoint/durable-workflow.ts';
 export { MergeBus, type MergePacket, type MergePublishResult } from './merge/index.ts';
 export { DeliveryGate } from './delivery/index.ts';
 export { InProcessRunner, SubagentRunner, type UnitRunner, type UnitStepResult, } from './unit/runner.ts';
-export { ActivationManager, type ActivationStartResult, type ActivationWaitResult, } from './unit/activation-manager.ts';
+export { ActivationManager, type ActivationStartResult, type ActivationWaitResult, type ActivationStartRecord, } from './unit/activation-manager.ts';
 export { createWorkId, createInputRecord, type WorkId, type InputId, type InputRecord, } from './unit/input-record.ts';
 export { TurnRunShell } from './turn/turn-run-shell.ts';
 export { settleTurn, type TurnSettleResult } from './turn/settle.ts';

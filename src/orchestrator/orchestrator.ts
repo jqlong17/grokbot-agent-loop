@@ -22,6 +22,11 @@ import { DeliveryGate } from '../delivery/gate.ts'
 import { classifyAdmit } from './classify.ts'
 import type { AdmitEvent, AdmitResult, OrchestratorAction } from './types.ts'
 import { userMessagePlainText } from '../steer-fold.ts'
+import {
+  RuleDecisionLayer,
+  type DecisionLayer,
+  type DecisionLayerResult,
+} from './decision-layer.ts'
 
 export interface OrchestratorOptions {
   readonly registry?: WorkUnitRegistry
@@ -30,24 +35,32 @@ export interface OrchestratorOptions {
   readonly deliveryGateMaxRetries?: number
   /** Default OTHER mode when event omits otherMode (0.2.0 default: spawn). */
   readonly defaultOtherMode?: 'fold' | 'spawn' | 'fork' | 'subagent'
+  /**
+   * Cheap score/route before expensive spawn (0.2.2 default: RuleDecisionLayer).
+   * Pass PassthroughDecisionLayer to opt out. Sync only on the admit path.
+   */
+  readonly decisionLayer?: DecisionLayer
 }
 
 /**
- * Single admission brain: absorb | spawn | cancel.
+ * Single admission brain: absorb | spawn | cancel | queue.
  * Completed step checkpoints are synced to CheckpointStore so preempt cannot
- * erase them (hard invariant).
+ * erase them (hard invariant). DecisionLayer may cheaply refine classify
+ * before spawn; LLM still does not route.
  */
 export class Orchestrator {
   readonly registry: WorkUnitRegistry
   readonly checkpointStore: CheckpointStore
   readonly mergeBus: MergeBus
   readonly deliveryGate: DeliveryGate
+  readonly decisionLayer: DecisionLayer
   private readonly defaultOtherMode: 'fold' | 'spawn'
 
   constructor(options: OrchestratorOptions = {}) {
     this.registry = options.registry ?? new WorkUnitRegistry()
     this.checkpointStore = options.checkpointStore ?? new MemoryCheckpointStore()
     this.defaultOtherMode = normalizeRpwuOtherMode(options.defaultOtherMode ?? 'spawn')
+    this.decisionLayer = options.decisionLayer ?? new RuleDecisionLayer()
     const gateEnabled = options.deliveryGate !== false
     const maxRetries = options.deliveryGateMaxRetries
     this.deliveryGate = new DeliveryGate({ enabled: gateEnabled, maxRetries })
@@ -64,7 +77,8 @@ export class Orchestrator {
 
   /**
    * Admit one inbox event.
-   * Mutates registry for absorb/spawn/cancel; returns action + unitIds for the host.
+   * Mutates registry for absorb/spawn/cancel/queue; returns action + unitIds for the host.
+   * classify → DecisionLayer (cheap) → physical registry mutation.
    */
   admit(event: AdmitEvent): AdmitResult {
     const decision = decideAdmission(event.kind, event.scheduler)
@@ -79,9 +93,14 @@ export class Orchestrator {
       rpwuEnabled,
       otherMode: otherModeRaw,
     })
+    const routed = this.applyDecision(event, classified.action)
+    const meta = {
+      decisionReason: routed.reason,
+      decisionScore: routed.score,
+    }
 
     // Explicit cancel path (no preempt required).
-    if (classified.action === 'cancel' && event.cancelUnitId) {
+    if (routed.action === 'cancel' && event.cancelUnitId) {
       const id = event.cancelUnitId
       if (this.registry.get(id)) {
         this.registry.markStatus(id, 'cancelled')
@@ -96,11 +115,12 @@ export class Orchestrator {
         target: decision.target,
         wakeup: decision.wakeup,
         claimAfterCancel: decision.claimAfterCancel,
+        ...meta,
       }
     }
 
     // queue(steer): do not preempt / dual-open; park on next-step after active turn.
-    if (classified.action === 'queue') {
+    if (routed.action === 'queue') {
       const active = this.registry.active()
       return {
         action: 'queue',
@@ -112,6 +132,7 @@ export class Orchestrator {
         target: 'next-step',
         wakeup: true,
         claimAfterCancel: true,
+        ...meta,
       }
     }
 
@@ -127,6 +148,7 @@ export class Orchestrator {
         target: decision.target,
         wakeup: decision.wakeup,
         claimAfterCancel: decision.claimAfterCancel,
+        ...meta,
       }
     }
 
@@ -140,6 +162,7 @@ export class Orchestrator {
         target: decision.target,
         wakeup: decision.wakeup,
         claimAfterCancel: decision.claimAfterCancel,
+        ...meta,
       }
     }
 
@@ -153,29 +176,54 @@ export class Orchestrator {
     const prefixCursor = event.assistantPrefixCursor
     const prefixHash = event.assistantPrefixHash
 
-    if (classified.action === 'absorb' || mode === 'fold') {
-      return this.admitAbsorb({
+    if (routed.action === 'absorb' || mode === 'fold') {
+      return {
+        ...this.admitAbsorb({
+          goalText,
+          otherText,
+          turn,
+          step,
+          decision,
+          prefixCursor,
+          prefixHash,
+        }),
+        ...meta,
+      }
+    }
+
+    // spawn (ideal) — useSubagent when seam present; else degrade visibly.
+    return {
+      ...this.admitSpawn({
         goalText,
         otherText,
         turn,
         step,
         decision,
+        hasSubagentSeam: Boolean(event.hasSubagentSeam),
         prefixCursor,
         prefixHash,
-      })
+      }),
+      ...meta,
     }
+  }
 
-    // spawn (ideal) — useSubagent when seam present; else degrade visibly.
-    return this.admitSpawn({
-      goalText,
-      otherText,
-      turn,
-      step,
-      decision,
-      hasSubagentSeam: Boolean(event.hasSubagentSeam),
-      prefixCursor,
-      prefixHash,
-    })
+  /**
+   * Sync DecisionLayer only — async layers fall back to proposed
+   * (admit path must stay synchronous).
+   */
+  private applyDecision(
+    event: AdmitEvent,
+    proposed: OrchestratorAction,
+  ): DecisionLayerResult {
+    const out = this.decisionLayer.decide({ event, proposed })
+    if (out && typeof (out as Promise<DecisionLayerResult>).then === 'function') {
+      return {
+        action: proposed,
+        reason: 'async DecisionLayer ignored on sync admit — using classify',
+        score: 0.5,
+      }
+    }
+    return out as DecisionLayerResult
   }
 
   /** Persist a checkpoint into both registry and store (preempt-safe). */

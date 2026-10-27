@@ -89,21 +89,22 @@ Config flags:
 - `rpwuCheckpointStore` (default `memory`) — `file` enables FileCheckpointStore skeleton
 - `deliveryGate` / `deliveryGateMaxRetries` — unchanged
 
-### Ideal Topology (0.2.1 — main path wired)
+### Ideal Topology (0.2.2 — parallel gold + DecisionLayer)
 
 ```
-User/steer → Orchestrator.admit (absorb|spawn|cancel|queue)
-                → TurnRunShell (checkpointChain + turn-settle)   ← live
-                → ActivationManager (start/wait/cancel/degrade) ← live spawn
-                → CheckpointStore (DurableWorkflow seam)
-                → MergeBus + DeliveryGate → MAIN chat
+User/steer → DecisionLayer.score/route → Orchestrator.admit
+                → TurnRunShell (checkpointChain + turn-settle)
+                → ActivationManager (start/wait/cancel; parent≠child Session)
+                → CheckpointStore → MergeBus + DeliveryGate → MAIN chat
 ```
 
-**0.2.1:** Agent is Cordis host glue; admitted turns run through **TurnRunShell**; spawn/host parallel through **ActivationManager** (missing seam → visible degrade, never throws). Orchestrator remains the only admit brain. Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md).
+**0.2.2 (B+C):** Dual-Session gold tests with fake `ctx.subagents` seam; missing seam → degrade, never throws. `RuleDecisionLayer` cheaply routes absorb/spawn/cancel/queue before expensive spawn (LLM is not the OS). Optional live script: `npm run smoke:live-parallel` (skips unless `GROKBOT_LIVE_PARALLEL=1`). Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md) · [`CHANGELOG.md`](./CHANGELOG.md).
 
-**Outer** = this plugin (admit, durability, merge, gate, AgentEvent). **Inner** = dsh ReAct. True parallel = host subagent.
+**0.2.1:** Agent = Cordis glue; TurnRunShell + ActivationManager live main path.
 
-**Breaking vs 0.1.9 (from 0.2.0):** default `rpwuOtherMode` `fold` → `spawn`; package layout split under `orchestrator/` `unit/` `checkpoint/` `merge/` `delivery/` (root re-exports kept). Interruptible ⊥ Durable tested separately.
+**Outer** = this plugin. **Inner** = dsh ReAct. True parallel = host subagent.
+
+**Breaking vs 0.1.9 (from 0.2.0):** default `rpwuOtherMode` `fold` → `spawn`; package layout split (root re-exports kept). Interruptible ⊥ Durable tested separately.
 
 ### 0.1.9 notes
 

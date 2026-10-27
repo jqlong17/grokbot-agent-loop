@@ -35,14 +35,25 @@ export interface ActivationManagerOptions {
     readonly provider?: string;
     readonly delivery?: 'parent' | 'caller';
 }
+/** Observable start record for dual-Session gold / trajectory. */
+export interface ActivationStartRecord {
+    readonly unitId: string;
+    readonly childSessionId: string;
+    readonly parentId: string;
+    readonly provider: string;
+    readonly at: number;
+}
 /** Unified façade over host startActivation / wait / cancel / degrade. */
 export declare class ActivationManager {
     private readonly options;
     private readonly aborts;
     private readonly started;
+    private readonly _starts;
     constructor(options: ActivationManagerOptions);
     /** True when host seam exposes startActivation. */
     get available(): boolean;
+    /** Successful startActivation records (parent ≠ child Session evidence). */
+    get starts(): readonly ActivationStartRecord[];
     start(options: {
         unitId: string;
         promptText: string;

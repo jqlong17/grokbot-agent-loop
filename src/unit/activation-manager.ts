@@ -36,16 +36,31 @@ export interface ActivationManagerOptions {
   readonly delivery?: 'parent' | 'caller'
 }
 
+/** Observable start record for dual-Session gold / trajectory. */
+export interface ActivationStartRecord {
+  readonly unitId: string
+  readonly childSessionId: string
+  readonly parentId: string
+  readonly provider: string
+  readonly at: number
+}
+
 /** Unified façade over host startActivation / wait / cancel / degrade. */
 export class ActivationManager {
   private readonly aborts = new Map<string, AbortController>()
   private readonly started = new Map<string, StartedWorkUnitSubagent>()
+  private readonly _starts: ActivationStartRecord[] = []
 
   constructor(private readonly options: ActivationManagerOptions) {}
 
   /** True when host seam exposes startActivation. */
   get available(): boolean {
     return resolveSubagentsRuntime({ ctx: this.options.ctx }) !== null
+  }
+
+  /** Successful startActivation records (parent ≠ child Session evidence). */
+  get starts(): readonly ActivationStartRecord[] {
+    return this._starts
   }
 
   async start(options: {
@@ -73,6 +88,13 @@ export class ActivationManager {
         signal: abort.signal,
       })
       this.started.set(options.unitId, started)
+      this._starts.push({
+        unitId: options.unitId,
+        childSessionId: started.activationRef.childSessionId,
+        parentId: String(this.options.parent.id),
+        provider: started.activationRef.provider,
+        at: Date.now(),
+      })
       return { kind: 'started', started }
     } catch (err) {
       this.aborts.delete(options.unitId)

@@ -219,7 +219,8 @@ describe('0.2.1 main path — TurnRunShell + ActivationManager', () => {
     await new Promise(r => setTimeout(r, 20))
 
     agent.steer(createUserMessage({
-      content: [{ type: 'text', text: 'OTHER' }],
+      // Independent OTHER so DecisionLayer keeps spawn (not short-ack absorb).
+      content: [{ type: 'text', text: 'packing list please fetch socks' }],
       source: { kind: 'user' },
     }))
 

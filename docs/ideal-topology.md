@@ -17,7 +17,7 @@ Community homage target — **not** xAI / Grok Bot official. Supersedes v1.
 ## Core objects
 
 - `Orchestrator` — deterministic routing (LLM is not the OS); **only** admit brain
-- `DecisionLayer` — optional cheap pre-spawn stub
+- `DecisionLayer` / `RuleDecisionLayer` — cheap score/route before expensive spawn (**0.2.2**)
 - `WorkUnit` + `workId` / `InputRecord.inputId`
 - `TurnRunShell` + `checkpointChain` + `turn-settle` — **live main path** (0.2.1+)
 - `UnitRunner` (`InProcess` \| `Subagent`) + `ActivationManager` — **live spawn path** (0.2.1+)
@@ -25,21 +25,22 @@ Community homage target — **not** xAI / Grok Bot official. Supersedes v1.
 - `CheckpointStore` + `DurableWorkflow` seam (memory default; no Temporal required)
 - `AgentEvent` bus · `MergeBus` · `DeliveryGate`
 
+## 0.2.2 — parallel gold + DecisionLayer (B + C)
+
+```
+User/steer → classify → DecisionLayer.score/route (cheap)
+                → Orchestrator.admit (absorb|spawn|cancel|queue)
+                → TurnRunShell (checkpointChain + settle)
+                → ActivationManager.start/wait/cancel  (parent≠child Session)
+                → MergeBus + DeliveryGate → MAIN chat
+```
+
+- **B:** With `ctx.subagents`, dual Session is observable (`startActivation`, `activationRef`, `hostActivations.starts` parentId ≠ childSessionId); fold/merge/gate still apply. Missing seam → visible degrade, never throws. CI uses fake-seam vitest (`tests/parallel-gold.spec.ts`); optional `scripts/live-parallel.mjs` skips unless `GROKBOT_LIVE_PARALLEL=1`.
+- **C:** `RuleDecisionLayer` (default) — cancel explicit, queue steer, absorb short OTHER / same deliverable, spawn independent. `PassthroughDecisionLayer` opt-out. Orchestrator remains sole admit brain.
+
 ## 0.2.1 — thin Agent main path (wired)
 
-As of **0.2.1**, admitted turns actually run through **TurnRunShell** and host-parallel spawn through **ActivationManager**:
-
-```
-User/steer → Orchestrator.admit (absorb|spawn|cancel|queue)
-                → TurnRunShell.afterStepCheckpoint + checkpointChain + settle
-                → ActivationManager.start / wait / cancel / degrade  (spawn)
-                → CheckpointStore → MergeBus + DeliveryGate → MAIN chat
-```
-
-- **Agent** = Cordis host glue (inbox, phase, physical cancel/claim). Does **not** re-implement routing.
-- **TurnRunShell** writes step checkpoints to registry + store; turn-end / fold-back calls `settle()`.
-- **ActivationManager** owns start/wait/cancel; missing seam or start failure → visible degrade, **never throws**.
-- Interruptible ⊥ Durable remain separately tested (`interruptible.spec.ts` ⊥ `durable-invariant.spec.ts`).
+Admitted turns run through **TurnRunShell**; spawn through **ActivationManager**. Agent = Cordis host glue.
 
 ## Interruptible ⊥ Durable
 
@@ -56,4 +57,4 @@ User/steer → Orchestrator.admit (absorb|spawn|cancel|queue)
 
 ## Non-goals (this release)
 
-Temporal engine · official UI · Feishu blackboard · changing dsh Phase machine · DecisionLayer/Summary full product (next slices)
+Temporal · Mac smoke · Feishu · full Summary product (slice D) · changing dsh Phase machine

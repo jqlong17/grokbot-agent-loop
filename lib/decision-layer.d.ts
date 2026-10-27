@@ -1,11 +1,8 @@
 /**
- * Optional DecisionLayer (JEV-like) — Ideal Topology v1.
+ * DecisionLayer — cheap deterministic score/route (Ideal Topology v1.1).
  *
- * Cheap pre-spawn hook: Orchestrator may consult this before committing spawn.
- * Interface-only in 0.2.0; default always allows spawn.
- *
- * Deterministic admission remains owned by Orchestrator — the model does not
- * route absorb|spawn|cancel.
+ * Orchestrator may consult this before committing an expensive spawn.
+ * LLM is not the OS: rules only; Orchestrator remains the sole admit brain.
  *
  * @module @harness-plugins/grokbot-agent-loop/decision-layer
  */
@@ -17,13 +14,24 @@ export interface DecisionLayerInput {
 export interface DecisionLayerResult {
     readonly action: OrchestratorAction;
     readonly reason: string;
+    /** Cheap confidence in [0, 1]. */
+    readonly score: number;
 }
 /** Optional cheap decision hook consulted before spawn. */
 export interface DecisionLayer {
     decide(input: DecisionLayerInput): DecisionLayerResult | Promise<DecisionLayerResult>;
 }
-/** Default: pass through proposed action (no-op DecisionLayer). */
+/** Default: pass through proposed action (opt-out / tests). */
 export declare class PassthroughDecisionLayer implements DecisionLayer {
+    decide(input: DecisionLayerInput): DecisionLayerResult;
+}
+/**
+ * Pure score/route helper — unit-testable without Orchestrator.
+ * Does not mutate state; Orchestrator applies the returned action.
+ */
+export declare function scoreRoute(input: DecisionLayerInput): DecisionLayerResult;
+/** Rule-based DecisionLayer (0.2.2 default for Orchestrator). */
+export declare class RuleDecisionLayer implements DecisionLayer {
     decide(input: DecisionLayerInput): DecisionLayerResult;
 }
 //# sourceMappingURL=decision-layer.d.ts.map
