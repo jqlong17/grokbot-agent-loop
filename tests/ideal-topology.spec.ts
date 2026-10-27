@@ -24,6 +24,7 @@ import {
   checkpointChain,
   dualSessionPair,
   StubSummarySession,
+  MemorySummarySession,
   asMainSession,
   settleTurn,
   WorkUnitRegistry,
@@ -301,12 +302,19 @@ describe('Ideal Topology v1.1 — AgentEvent + DecisionLayer + dual session + Du
     expect(input.nonce).toBeTruthy()
   })
 
-  it('MainSession + SummarySession stubs', () => {
+  it('MainSession + SummarySession stubs / MemorySummarySession carrier', () => {
     const pair = dualSessionPair('sess-1', new StubSummarySession('sum-1'))
     expect(pair.main.role).toBe('main')
     expect(pair.summary?.role).toBe('summary')
     expect(asMainSession('sess-1').role).toBe('main')
     expect(new StubSummarySession().summarize()).toBe('')
+    const mem = new MemorySummarySession('sum-mem')
+    const carrier = mem.toCarrier({
+      completedTurn: 1,
+      transcriptHint: 'goal=MAIN',
+    })
+    expect(carrier?.role).toBe('user')
+    expect(carrier?.text).toMatch(/grokbot-summary-carrier/)
   })
 
   it('DurableWorkflow memory seam hydrates', () => {

@@ -32,7 +32,7 @@ export { TurnRunShell } from './turn/turn-run-shell.ts';
 export { settleTurn, type TurnSettleResult } from './turn/settle.ts';
 export { checkpointChain, completedStepsSurvivedPreempt, isCompletedStepCheckpoint, type Turn, type Step, type AfterStepCheckpoint, type CheckpointChain, } from './turn-step.ts';
 export { AgentEventBus, type AgentEvent, type AgentEventListener } from './events.ts';
-export { dualSessionPair, StubSummarySession, asMainSession, type DualSessionPair, type DualSessionHandle, type SummarySession, type MainSession, type SessionRole, } from './session/main-summary.ts';
+export { dualSessionPair, StubSummarySession, MemorySummarySession, SUMMARY_CARRIER_MARKER, buildSummaryCarrierMessage, parseSummaryCarrierText, isSummaryCarrierMessage, injectSummaryCarrierIntoMain, asMainSession, type DualSessionPair, type DualSessionHandle, type SummarySession, type SummaryCarrier, type SummaryRecord, type MainSession, type SessionRole, } from './session/main-summary.ts';
 /** Host projection of agent turn and step boundaries. */
 export declare const turnBoundaryProjectionDefinition: {
     key: "turnBoundary";

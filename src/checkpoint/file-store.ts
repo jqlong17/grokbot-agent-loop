@@ -1,8 +1,8 @@
 /**
- * File-backed CheckpointStore skeleton — Ideal Topology v1.
+ * File-backed CheckpointStore — Ideal Topology v1.1 (0.2.3 hydrate smoke).
  *
- * Persists a JSON snapshot under `path`. Suitable for smoke / future P2;
- * production durability still belongs to host session persistence.
+ * Persists a JSON snapshot under `path`. Memory remains the default;
+ * File is opt-in evidence for cross-process durability (NOT Temporal).
  *
  * @module @harness-plugins/grokbot-agent-loop/checkpoint/file-store
  */
@@ -22,16 +22,22 @@ interface FilePayload {
 }
 
 /**
- * Skeleton file store: mirrors MemoryCheckpointStore and flushes to disk.
+ * File store: mirrors MemoryCheckpointStore and flushes to disk.
+ * `loadQuiet` replaces in-memory state from disk (process-restart safe).
  * Missing / corrupt files start empty (visible degrade, never throws on hydrate).
  */
 export class FileCheckpointStore implements CheckpointStore {
-  private readonly memory = new MemoryCheckpointStore()
+  private memory = new MemoryCheckpointStore()
   private readonly filePath: string
 
   constructor(options: FileCheckpointStoreOptions) {
     this.filePath = options.path
     this.loadQuiet()
+  }
+
+  /** Absolute path used for persistence (tests / smoke). */
+  get path(): string {
+    return this.filePath
   }
 
   put(cp: StepCheckpoint): void {
@@ -57,26 +63,51 @@ export class FileCheckpointStore implements CheckpointStore {
     this.flushQuiet()
   }
 
+  /** Reload from disk into a fresh memory, then rebuild `registry`. */
   hydrate(registry: WorkUnitRegistry): void {
     this.loadQuiet()
     this.memory.hydrate(registry)
   }
 
-  /** Best-effort load; corrupt / missing → empty store. */
+  /**
+   * Best-effort load; corrupt / missing → empty store.
+   * Always replaces `memory` so repeated hydrate / new-process simulation
+   * does not duplicate checkpoints.
+   */
   private loadQuiet(): void {
+    const next = new MemoryCheckpointStore()
     try {
-      if (!existsSync(this.filePath)) return
+      if (!existsSync(this.filePath)) {
+        this.memory = next
+        return
+      }
       const raw = readFileSync(this.filePath, 'utf8')
       const parsed = JSON.parse(raw) as FilePayload
-      if (!parsed || !Array.isArray(parsed.units)) return
-      for (const unit of parsed.units) this.memory.saveUnit(unit)
-      if (Array.isArray(parsed.checkpoints)) {
-        for (const cp of parsed.checkpoints) this.memory.put(cp)
+      if (!parsed || !Array.isArray(parsed.units)) {
+        this.memory = next
+        return
       }
-      this.memory.setActiveId(parsed.activeId ?? null)
+      // Unit rows embed checkpoints — restore from units only to avoid double-put.
+      for (const unit of parsed.units) next.saveUnit(unit)
+      // Orphan checkpoints (unit missing from snapshot) still apply.
+      if (Array.isArray(parsed.checkpoints)) {
+        for (const cp of parsed.checkpoints) {
+          const existing = next.list(cp.unitId)
+          const already = existing.some(e =>
+            e.stepIndex === cp.stepIndex
+            && e.turn === cp.turn
+            && e.reason === cp.reason
+            && e.assistantPrefixHash === cp.assistantPrefixHash
+            && e.at === cp.at,
+          )
+          if (!already) next.put(cp)
+        }
+      }
+      next.setActiveId(parsed.activeId ?? null)
     } catch {
       // Skeleton: never throw on boot; callers see empty hydrate.
     }
+    this.memory = next
   }
 
   private flushQuiet(): void {

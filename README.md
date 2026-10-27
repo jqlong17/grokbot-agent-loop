@@ -89,18 +89,19 @@ Config flags:
 - `rpwuCheckpointStore` (default `memory`) — `file` enables FileCheckpointStore skeleton
 - `deliveryGate` / `deliveryGateMaxRetries` — unchanged
 
-### Ideal Topology (0.2.2 — parallel gold + DecisionLayer)
+### Ideal Topology (0.2.3 — Summary carrier + File hydrate)
 
 ```
-User/steer → DecisionLayer.score/route → Orchestrator.admit
-                → TurnRunShell (checkpointChain + turn-settle)
-                → ActivationManager (start/wait/cancel; parent≠child Session)
-                → CheckpointStore → MergeBus + DeliveryGate → MAIN chat
+User/steer → DecisionLayer → Orchestrator.admit
+                → TurnRunShell / ActivationManager
+                → MemorySummarySession → user-role carrier → MAIN
+                → CheckpointStore (memory default | file hydrate smoke)
+                → MergeBus + DeliveryGate → MAIN chat
 ```
 
-**0.2.2 (B+C):** Dual-Session gold tests with fake `ctx.subagents` seam; missing seam → degrade, never throws. `RuleDecisionLayer` cheaply routes absorb/spawn/cancel/queue before expensive spawn (LLM is not the OS). Optional live script: `npm run smoke:live-parallel` (skips unless `GROKBOT_LIVE_PARALLEL=1`). Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md) · [`CHANGELOG.md`](./CHANGELOG.md).
+**0.2.3 (D+E):** `MemorySummarySession` injects summary as **user-role** carrier into MAIN (no second UI). `FileCheckpointStore` round-trips put→restart→hydrate (unit + checkpoints + workId); Memory remains default. Spec: [`docs/ideal-topology.md`](./docs/ideal-topology.md) · [`CHANGELOG.md`](./CHANGELOG.md).
 
-**0.2.1:** Agent = Cordis glue; TurnRunShell + ActivationManager live main path.
+**0.2.2 (B+C):** Dual-Session gold + `RuleDecisionLayer`. **0.2.1:** thin Agent main path.
 
 **Outer** = this plugin. **Inner** = dsh ReAct. True parallel = host subagent.
 

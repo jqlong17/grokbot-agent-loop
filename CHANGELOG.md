@@ -2,6 +2,13 @@
 
 Community homage plugin — **not affiliated with xAI / Grok Bot**.
 
+## 0.2.3
+
+**Slices D + E** toward Ideal Topology score ≥8.0.
+
+- **D — SummarySession carrier:** `MemorySummarySession` + `SUMMARY_CARRIER_MARKER` inject summary back into MAIN as **user-role** (`buildSummaryCarrierMessage` / `injectSummaryCarrierIntoMain`). Stub remains available; no second product UI.
+- **E — File CheckpointStore hydrate:** put → new-process `FileCheckpointStore` → hydrate rebuilds unit + checkpoints + workId. Memory stays default; File is opt-in durability evidence (not Temporal). Interruptible ⊥ Durable tests stay separate.
+
 ## 0.2.2
 
 **Slices B + C** toward Ideal Topology score ≥8.0.

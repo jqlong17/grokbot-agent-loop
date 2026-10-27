@@ -202,10 +202,18 @@ export { AgentEventBus, type AgentEvent, type AgentEventListener } from './event
 export {
   dualSessionPair,
   StubSummarySession,
+  MemorySummarySession,
+  SUMMARY_CARRIER_MARKER,
+  buildSummaryCarrierMessage,
+  parseSummaryCarrierText,
+  isSummaryCarrierMessage,
+  injectSummaryCarrierIntoMain,
   asMainSession,
   type DualSessionPair,
   type DualSessionHandle,
   type SummarySession,
+  type SummaryCarrier,
+  type SummaryRecord,
   type MainSession,
   type SessionRole,
 } from './session/main-summary.ts'
